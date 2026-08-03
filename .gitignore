@@ -1,0 +1,23 @@
+node_modules/
+dist/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Test output
+playwright-report/
+test-results/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
