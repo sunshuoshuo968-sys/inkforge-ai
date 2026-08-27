@@ -789,12 +789,98 @@ function NavButton({ view, active, onClick }: { view: ViewId; active: boolean; o
 
 function EmptyWorkspace({ onAiCreate, onManualCreate }: { onAiCreate: () => void; onManualCreate: () => void }) {
   return (
-    <div className="empty-workspace">
-      <div className="empty-illustration ai-empty-icon"><Sparkles size={48} strokeWidth={1.4} /></div>
-      <h1>把一个想法交给 AI</h1>
-      <p>输入故事创意，AI 会自动完成设定、大纲和每一章正文，并按选择的质量流程审稿与修订。</p>
-      <button className="primary-button ai-create-cta" onClick={onAiCreate}><Sparkles size={18} />AI 一键创作</button>
-      <button className="text-button manual-create-link" onClick={onManualCreate}>或创建空白项目</button>
+    <div className="empty-workspace premium-landing">
+      <div className="landing-noise" aria-hidden="true" />
+      <div className="landing-orb landing-orb-one" aria-hidden="true" />
+      <div className="landing-orb landing-orb-two" aria-hidden="true" />
+      <div className="landing-shell">
+        <section className="landing-hero">
+          <div className="landing-hero-copy">
+            <div className="landing-eyebrow"><span className="eyebrow-pulse" />MOGOU CREATIVE OS <span className="eyebrow-divider" />为长期创作而生</div>
+            <div className="landing-mantra">把一个想法交给 AI</div>
+            <h1>让灵感，<br /><em>长成一部作品。</em></h1>
+            <p className="landing-lede">墨构把散落的灵感、复杂的设定与漫长的写作，收束成一条可持续的创作轨道。你负责想象，AI 负责让故事始终向前。</p>
+            <div className="landing-actions">
+              <button className="landing-primary" onClick={onAiCreate}><span className="landing-button-icon"><Sparkles size={17} /></span>AI 一键创作<span className="landing-button-arrow">↗</span></button>
+              <button className="landing-secondary" onClick={onManualCreate}><span className="landing-play"><Play size={14} fill="currentColor" /></span>从空白开始</button>
+            </div>
+            <div className="landing-trust-row">
+              <span><Check size={13} />本地优先</span>
+              <span><ShieldCheck size={13} />你的故事只属于你</span>
+              <span><Feather size={13} />支持长篇连载</span>
+            </div>
+          </div>
+
+          <div className="landing-stage" aria-label="墨构工作台预览">
+            <div className="stage-glow" aria-hidden="true" />
+            <div className="stage-window">
+              <div className="stage-window-bar"><span className="stage-dots"><i /><i /><i /></span><span className="stage-window-title">雾城来信 · 创作中</span><span className="stage-live"><span />LIVE</span></div>
+              <div className="stage-workspace">
+                <div className="stage-rail">
+                  <div className="stage-brand-mark"><Feather size={14} /></div>
+                  <span className="stage-rail-item active"><BookOpenText size={14} /></span>
+                  <span className="stage-rail-item"><UsersRound size={14} /></span>
+                  <span className="stage-rail-item"><Globe2 size={14} /></span>
+                  <span className="stage-rail-item"><BrainCircuit size={14} /></span>
+                  <span className="stage-rail-item"><BookMarked size={14} /></span>
+                </div>
+                <div className="stage-chapters">
+                  <div className="stage-chapter-head"><span>章节</span><small>12 / 36</small></div>
+                  <div className="stage-search"><span />搜索章节</div>
+                  <div className="stage-chapter-row active"><b>01</b><span><strong>潮汐后的来信</strong><small>已完成 · 2,486 字</small></span><i /></div>
+                  <div className="stage-chapter-row"><b>02</b><span><strong>没有寄件人的包裹</strong><small>已完成 · 2,713 字</small></span><i /></div>
+                  <div className="stage-chapter-row"><b>03</b><span><strong>凌晨四点的回声</strong><small>正在修订</small></span><i className="working" /></div>
+                </div>
+                <div className="stage-editor">
+                  <div className="stage-editor-top"><span>第 03 章</span><span className="stage-saved"><Check size={11} />已保存</span></div>
+                  <h3>凌晨四点的回声</h3>
+                  <div className="stage-rule" />
+                  <div className="stage-copy"><p>四点十七分，雾城的灯同时熄灭。</p><p>林默站在旧邮局门口，手里的信封没有寄件人，只有一行被雨水晕开的地址。</p><p>他知道这座城市正在隐瞒什么。就像它隐瞒了母亲最后一通电话。</p><span className="stage-caret" /></div>
+                  <div className="stage-editor-foot"><span>本章进度 <b>68%</b></span><span className="stage-progress"><i /></span><span>1,704 / 2,500 字</span></div>
+                </div>
+                <div className="stage-insight">
+                  <div className="insight-label"><Sparkles size={12} />章节 AI</div>
+                  <strong>叙事状态</strong>
+                  <div className="insight-chart"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
+                  <div className="insight-score"><span>张力指数</span><b>86</b><small>+12%</small></div>
+                  <div className="insight-note"><span />伏笔回收提醒<small>第 01 章 · 旧邮戳</small></div>
+                </div>
+              </div>
+              <div className="stage-status"><span><span className="status-online" />AI 正在理解你的故事</span><span>标准成稿流程 · 3 个阶段</span><span className="stage-status-action">查看工作流 ↗</span></div>
+            </div>
+            <div className="stage-caption"><span>一个能记住上下文的创作伙伴</span><span>实时预览</span></div>
+          </div>
+        </section>
+
+        <section className="landing-proof" aria-label="产品能力数据">
+          <div className="proof-intro"><span className="proof-kicker">THE LONG GAME</span><strong>写得更远，<br />也写得更像你。</strong></div>
+          <div className="proof-stat"><b>10×</b><span>更快搭建完整世界观</span></div>
+          <div className="proof-stat"><b>100%</b><span>上下文与设定可追溯</span></div>
+          <div className="proof-stat"><b>∞</b><span>属于你的故事可能性</span></div>
+        </section>
+
+        <section className="landing-features">
+          <div className="landing-section-heading"><div><span className="section-kicker">A BETTER WAY TO WRITE</span><h2>不是替你写，<br /><em>而是让你写得更好。</em></h2></div><p>从第一句灵感到最后一次修订，墨构把创作中最耗心力的部分变成清晰、可掌控的系统。</p></div>
+          <div className="feature-grid">
+            <article className="feature-card feature-card-large"><div className="feature-index">01</div><div className="feature-icon"><Sparkles size={20} /></div><h3>一键生成整部小说</h3><p>输入一个念头，自动展开人物弧光、世界规则、章节钩子与完整初稿。不是随机拼接，而是一条有因果的故事线。</p><span className="feature-link">从创意到大纲 <b>↗</b></span></article>
+            <article className="feature-card"><div className="feature-index">02</div><div className="feature-icon"><BookMarked size={20} /></div><h3>记得住的故事大脑</h3><p>角色、时间线、伏笔和设定集中沉淀，写到长篇后半程也不会丢掉最初的那束光。</p><span className="feature-link">查看记忆系统 <b>↗</b></span></article>
+            <article className="feature-card"><div className="feature-index">03</div><div className="feature-icon"><ListChecks size={20} /></div><h3>每一章都值得发布</h3><p>写作、审读、修订、终审四段质量流程，让灵感落地时依然有节奏、有张力、有完成度。</p><span className="feature-link">了解质量流程 <b>↗</b></span></article>
+          </div>
+        </section>
+
+        <section className="landing-workflow">
+          <div className="workflow-copy"><span className="section-kicker">FROM IDEA TO INK</span><h2>把创作变成<br /><em>一条可走的路。</em></h2><p>你不需要一次想清楚整本书。墨构会在每一个关键节点，给你足够的方向，也留下足够的自由。</p><button className="workflow-link" onClick={onAiCreate}>开始你的第一章 <span>↗</span></button></div>
+          <div className="workflow-steps">
+            <div className="workflow-step active"><span className="workflow-number">01</span><div><strong>种下一个念头</strong><p>一句话、一幅画面，或一个挥之不去的问题。</p></div><Sparkles size={17} /></div>
+            <div className="workflow-line" />
+            <div className="workflow-step"><span className="workflow-number">02</span><div><strong>长出一座世界</strong><p>人物、规则、关系与命运开始彼此咬合。</p></div><Globe2 size={17} /></div>
+            <div className="workflow-line" />
+            <div className="workflow-step"><span className="workflow-number">03</span><div><strong>留下你的笔迹</strong><p>AI 扩展可能性，你决定故事最终的方向。</p></div><Feather size={17} /></div>
+          </div>
+        </section>
+
+        <footer className="landing-footer"><span><Feather size={14} />墨构 MOGOU STUDIO</span><span>AI 小说创作工作台 · v0.1</span><span>Made for stories that stay with you.</span></footer>
+      </div>
     </div>
   )
 }
