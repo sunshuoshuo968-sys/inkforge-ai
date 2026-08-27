@@ -30,6 +30,9 @@ export const createProject = (title: string, genre: string, synopsis: string): N
   ideas: [],
   memories: [],
   trash: [],
+  aiMemory: [],
+  aiOperations: [],
+  aiUsage: [],
 })
 
 export const createAiProject = (plan: AiNovelPlan, request: AiNovelRequest): NovelProject => {
@@ -86,6 +89,9 @@ export const createAiProject = (plan: AiNovelPlan, request: AiNovelRequest): Nov
       updatedAt: timestamp,
     }],
     trash: [],
+    aiMemory: [],
+    aiOperations: [],
+    aiUsage: [],
     generation: {
       prompt: request.idea,
       style: request.style,
@@ -105,6 +111,7 @@ export const defaultData: AppData = {
   version: 1,
   projects: [],
   activeProjectId: null,
+  aiUsage: [],
   settings: {
     theme: 'light',
     fontFamily: 'serif',

@@ -1,4 +1,4 @@
-export type ViewId = 'outline' | 'characters' | 'world' | 'plot' | 'memory' | 'ideas' | 'trash' | 'settings'
+export type ViewId = 'home' | 'outline' | 'characters' | 'world' | 'plot' | 'memory' | 'ideas' | 'trash' | 'settings'
 
 export type ChapterStatus = 'draft' | 'revising' | 'done'
 
@@ -77,6 +77,41 @@ export interface GenerationState {
   startedAt: number
 }
 
+export interface AiMemoryEntry {
+  id: string
+  chapterId?: string
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: number
+}
+
+export interface AiOperation {
+  id: string
+  chapterId: string
+  chapterTitle: string
+  action: 'replace' | 'insert' | 'restore'
+  prompt: string
+  beforeContent: string
+  afterContent: string
+  providerId: string
+  model: string
+  tokens: number
+  createdAt: number
+}
+
+export interface AiUsageRecord {
+  id: string
+  date: string
+  providerId: string
+  model: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  words: number
+  source: 'plan' | 'generation' | 'chat' | 'revision' | 'review'
+  chapterId?: string
+}
+
 export interface Character {
   id: string
   name: string
@@ -131,6 +166,9 @@ export interface NovelProject {
   ideas: NoteItem[]
   memories: MemoryItem[]
   trash: TrashItem[]
+  aiMemory: AiMemoryEntry[]
+  aiOperations: AiOperation[]
+  aiUsage: AiUsageRecord[]
   generation?: GenerationState
 }
 
@@ -156,6 +194,7 @@ export interface AppData {
   projects: NovelProject[]
   activeProjectId: string | null
   settings: AppSettings
+  aiUsage: AiUsageRecord[]
 }
 
 export interface AiMessage {

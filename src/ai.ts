@@ -1,5 +1,12 @@
 import type { AiMessage, AiNovelPlan, AiNovelRequest, AiProvider, NovelProject } from './types'
 
+export interface AiUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  estimated: boolean
+}
+
 type AiInteractionMode = 'chat' | 'revision'
 
 interface StreamOptions {
@@ -19,6 +26,16 @@ interface CompleteOptions {
   project: NovelProject
   prompt: string
   signal?: AbortSignal
+  onUsage?: (usage: AiUsage) => void
+}
+
+const estimateTokens = (value: string) => Math.max(1, Math.ceil(value.length / 2))
+
+const normalizeUsage = (usage: Partial<AiUsage> | undefined, inputText: string, outputText: string): AiUsage => {
+  const inputTokens = Number(usage?.inputTokens || 0) || estimateTokens(inputText)
+  const outputTokens = Number(usage?.outputTokens || 0) || estimateTokens(outputText)
+  const totalTokens = Number(usage?.totalTokens || 0) || inputTokens + outputTokens
+  return { inputTokens, outputTokens, totalTokens, estimated: !usage?.totalTokens }
 }
 
 const trimSlash = (value: string) => value.replace(/\/+$/, '')
@@ -92,6 +109,7 @@ const buildSystemPrompt = (
 类型：${project.genre}
 简介：${project.synopsis || '暂无'}
 当前章节：${chapterTitle || '未指定'}
+本次 AI 助手作用范围：仅限当前章节。除非作者在作品编辑器中主动切换章节，否则不得修改、重写或替换其他章节，也不得把当前请求解释为整本书改写。
 已有正文：${chapterExcerpt(chapterContent, Math.max(1000, chapterContextLimit))}
 角色资料：\n${characters || '暂无'}
 世界观：\n${world || '暂无'}
@@ -146,7 +164,7 @@ const normalizePlan = (value: string, request: AiNovelRequest): AiNovelPlan => {
   }
 }
 
-export const generateNovelPlan = async (provider: AiProvider, request: AiNovelRequest, signal?: AbortSignal): Promise<AiNovelPlan> => {
+export const generateNovelPlan = async (provider: AiProvider, request: AiNovelRequest, signal?: AbortSignal, onUsage?: (usage: AiUsage) => void): Promise<AiNovelPlan> => {
   assertProvider(provider)
   const prompt = `执行“大纲规划”工作流，根据下面的需求设计一部可以直接逐章生成的中文网络小说。
 
@@ -184,14 +202,16 @@ export const generateNovelPlan = async (provider: AiProvider, request: AiNovelRe
     const body = await response.text()
     throw new Error(`规划生成失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
   }
-  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }
   const content = result.choices?.[0]?.message?.content
   if (!content) throw new Error('模型没有返回小说计划')
+  onUsage?.(normalizeUsage({ inputTokens: result.usage?.prompt_tokens, outputTokens: result.usage?.completion_tokens, totalTokens: result.usage?.total_tokens }, prompt, content))
   return normalizePlan(content, request)
 }
 
-export const completeChat = async ({ provider, project, prompt, signal }: CompleteOptions) => {
+export const completeChat = async ({ provider, project, prompt, signal, onUsage }: CompleteOptions) => {
   assertProvider(provider)
+  const systemPrompt = buildSystemPrompt(project)
   const response = await fetch(chatCompletionsUrl(provider), {
     method: 'POST',
     headers: requestHeaders(provider),
@@ -199,7 +219,7 @@ export const completeChat = async ({ provider, project, prompt, signal }: Comple
       model: provider.model.trim(),
       ...modelOptions(provider, 0.25),
       messages: [
-        { role: 'system', content: buildSystemPrompt(project) },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt },
       ],
     }),
@@ -209,8 +229,10 @@ export const completeChat = async ({ provider, project, prompt, signal }: Comple
     const body = await response.text()
     throw new Error(`审稿请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
   }
-  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-  return result.choices?.[0]?.message?.content?.trim() || '未发现明确问题。'
+  const result = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }
+  const content = result.choices?.[0]?.message?.content?.trim() || '未发现明确问题。'
+  onUsage?.(normalizeUsage({ inputTokens: result.usage?.prompt_tokens, outputTokens: result.usage?.completion_tokens, totalTokens: result.usage?.total_tokens }, `${systemPrompt}\n${prompt}`, content))
+  return content
 }
 
 export const streamChat = async ({
@@ -249,15 +271,24 @@ export const streamChat = async ({
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let reportedUsage: Partial<AiUsage> | undefined
+  let streamedOutput = ''
   const processLine = (rawLine: string) => {
     const line = rawLine.trim()
     if (!line.startsWith('data:')) return
     const data = line.slice(5).trim()
     if (!data || data === '[DONE]') return
     try {
-      const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
+      const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }
+      if (parsed.usage) {
+        reportedUsage = {
+          inputTokens: parsed.usage.prompt_tokens,
+          outputTokens: parsed.usage.completion_tokens,
+          totalTokens: parsed.usage.total_tokens,
+        }
+      }
       const content = parsed.choices?.[0]?.delta?.content
-      if (content) onChunk(content)
+      if (content) { streamedOutput += content; onChunk(content) }
     } catch {
       // Compatible providers may emit non-JSON keepalive events.
     }
@@ -272,4 +303,5 @@ export const streamChat = async ({
   }
   buffer += decoder.decode()
   if (buffer.trim()) for (const rawLine of buffer.split('\n')) processLine(rawLine)
+  return normalizeUsage(reportedUsage, messages.map((message) => message.content).join('\n'), streamedOutput)
 }

@@ -1,10 +1,15 @@
 import {
   ArchiveRestore,
+  ArrowUpRight,
+  ArrowDownToLine,
+  BarChart3,
   Bell,
+  Bot,
   BookMarked,
   BookOpenText,
   BrainCircuit,
   Check,
+  Clock3,
   ChevronDown,
   CircleUserRound,
   Download,
@@ -16,7 +21,7 @@ import {
   FileText,
   Globe2,
   GripHorizontal,
-  Heart,
+  Home,
   Import,
   Lightbulb,
   ListChecks,
@@ -51,6 +56,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
+  type CSSProperties,
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -62,11 +68,13 @@ import {
   useRef,
   useState,
 } from 'react'
-import { completeChat, generateNovelPlan, streamChat } from './ai'
+import { completeChat, generateNovelPlan, streamChat, type AiUsage } from './ai'
 import { countWords, createAiProject, createChapter, createProject, defaultData, now, uid } from './data'
 import { exportData, loadData, parseImport, saveData } from './storage'
 import type {
   AiMessage,
+  AiOperation,
+  AiUsageRecord,
   AiNovelPlan,
   AiNovelRequest,
   AppData,
@@ -82,6 +90,7 @@ import type {
 import { buildChapterTakeoverPrompt, buildDraftPrompt, buildFanqiePrompt, buildReviewPrompt, buildRevisionPrompt, writingWorkflows } from './workflows'
 
 const viewMeta: Record<ViewId, { label: string; icon: typeof BookOpenText }> = {
+  home: { label: '首页', icon: Home },
   outline: { label: '大纲', icon: BookOpenText },
   characters: { label: '角色', icon: UsersRound },
   world: { label: '世界观', icon: Globe2 },
@@ -132,7 +141,7 @@ const memoryCategoryLabels: Record<MemoryCategory, string> = {
 function App() {
   const [data, setData] = useState<AppData>(defaultData)
   const [ready, setReady] = useState(false)
-  const [view, setView] = useState<ViewId>('outline')
+  const [view, setView] = useState<ViewId>('home')
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [aiCreateOpen, setAiCreateOpen] = useState(false)
@@ -166,14 +175,20 @@ function App() {
               )),
             ],
           },
-          projects: stored.projects.map((project) => project.generation?.status === 'generating' ? {
+          aiUsage: stored.aiUsage ?? [],
+          projects: stored.projects.map((project) => ({
             ...project,
             memories: project.memories ?? [],
-            generation: { ...project.generation, status: 'paused' },
-            chapters: project.chapters.map((chapter) => chapter.generationStatus === 'generating'
-              ? { ...chapter, generationStatus: 'pending', workflowStage: undefined }
-              : chapter),
-          } : { ...project, memories: project.memories ?? [] }),
+            aiMemory: project.aiMemory ?? [],
+            aiOperations: project.aiOperations ?? [],
+            aiUsage: project.aiUsage ?? [],
+            ...(project.generation?.status === 'generating' ? {
+              generation: { ...project.generation, status: 'paused' as const },
+              chapters: project.chapters.map((chapter) => chapter.generationStatus === 'generating'
+                ? { ...chapter, generationStatus: 'pending', workflowStage: undefined }
+                : chapter),
+            } : {}),
+          })),
         }
         dataRef.current = normalized
         setData(normalized)
@@ -238,6 +253,70 @@ function App() {
     }))
   }, [replaceData])
 
+  const recordUsage = useCallback((projectId: string | null, provider: { id: string; model: string }, usage: AiUsage, source: AiUsageRecord['source'], words: number, chapterId?: string) => {
+    const record: AiUsageRecord = {
+      id: uid(),
+      date: new Date().toISOString(),
+      providerId: provider.id,
+      model: provider.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      totalTokens: usage.totalTokens,
+      words,
+      source,
+      chapterId,
+    }
+    replaceData((current) => projectId
+      ? {
+          ...current,
+          projects: current.projects.map((project) => project.id === projectId
+            ? { ...project, aiUsage: [...(project.aiUsage ?? []), record].slice(-200), updatedAt: now() }
+            : project),
+        }
+      : { ...current, aiUsage: [...(current.aiUsage ?? []), record].slice(-200) })
+  }, [replaceData])
+
+  const persistAiMemory = useCallback((projectId: string, chapterId: string, messages: AiMessage[]) => {
+    updateProject(projectId, (project) => ({
+      ...project,
+      aiMemory: [
+        ...(project.aiMemory ?? []).filter((item) => item.chapterId !== chapterId),
+        ...messages.slice(-40).map((message) => ({ id: uid(), chapterId, role: message.role, content: message.content, createdAt: now() })),
+      ],
+    }))
+  }, [updateProject])
+
+  const recordAiOperation = useCallback((projectId: string, operation: Omit<AiOperation, 'id' | 'createdAt'>) => {
+    updateProject(projectId, (project) => ({
+      ...project,
+      aiOperations: [...(project.aiOperations ?? []), { ...operation, id: uid(), createdAt: now() }].slice(-50),
+    }))
+  }, [updateProject])
+
+  const undoAiOperation = useCallback((projectId: string, operationId: string) => {
+    updateProject(projectId, (project) => {
+      const operation = (project.aiOperations ?? []).find((item) => item.id === operationId)
+      if (!operation) return project
+      const chapter = project.chapters.find((item) => item.id === operation.chapterId)
+      if (!chapter) return project
+      const restored = { ...chapter, content: operation.beforeContent, updatedAt: now() }
+      return {
+        ...project,
+        chapters: project.chapters.map((item) => item.id === chapter.id ? restored : item),
+        aiOperations: [...(project.aiOperations ?? []), {
+          ...operation,
+          id: uid(),
+          action: 'restore' as const,
+          prompt: `回退：${operation.prompt}`,
+          beforeContent: chapter.content,
+          afterContent: operation.beforeContent,
+          createdAt: now(),
+        }].slice(-50),
+      }
+    })
+    setToast('已回退本章上一次 AI 操作')
+  }, [setToast, updateProject])
+
   const streamChapterStage = useCallback(async (
     project: NovelProject,
     chapterIndex: number,
@@ -249,7 +328,7 @@ function App() {
     if (!provider) throw new Error('生成所用的 AI 提供商已不存在')
     let output = ''
     let lastPaint = 0
-    await streamChat({
+    const usage = await streamChat({
       provider,
       project,
       chapterTitle: project.chapters[chapterIndex].title,
@@ -269,6 +348,7 @@ function App() {
         }))
       },
     })
+    recordUsage(project.id, provider, usage, stage === 'drafting' ? 'generation' : stage === 'reviewing' ? 'review' : 'revision', countWords(output), project.chapters[chapterIndex].id)
     updateProject(project.id, (current) => ({
       ...current,
       chapters: current.chapters.map((chapter, index) => index === chapterIndex
@@ -276,7 +356,7 @@ function App() {
         : chapter),
     }))
     return output
-  }, [updateProject])
+  }, [recordUsage, updateProject])
 
   const runGeneration = useCallback(async (projectId: string) => {
     if (generationRunningRef.current) return
@@ -323,6 +403,7 @@ function App() {
         let content = await streamChapterStage(project, chapterIndex, buildDraftPrompt(project, chapterIndex), 'drafting', controller.signal)
         const mode = project.generation!.qualityMode
         let review = ''
+        let reviewUsage: AiUsage | null = null
 
         if (mode === 'standard' || mode === 'fanqie') {
           updateProject(projectId, (current) => ({
@@ -332,7 +413,8 @@ function App() {
           project = dataRef.current.projects.find((item) => item.id === projectId)!
           const provider = dataRef.current.settings.providers.find((item) => item.id === project!.generation?.providerId)
           if (!provider) throw new Error('生成所用的 AI 提供商已不存在')
-          review = await completeChat({ provider, project: project!, prompt: buildReviewPrompt(project!, chapterIndex, content), signal: controller.signal })
+          review = await completeChat({ provider, project: project!, prompt: buildReviewPrompt(project!, chapterIndex, content), signal: controller.signal, onUsage: (usage) => { reviewUsage = usage } })
+          if (reviewUsage) recordUsage(project!.id, provider, reviewUsage, 'review', countWords(review), project!.chapters[chapterIndex].id)
           const score = Number(review.match(/(?:综合分数|综合评分)[：:\s]*(\d{1,3})/)?.[1] || 0) || undefined
           updateProject(projectId, (current) => ({
             ...current,
@@ -415,6 +497,12 @@ function App() {
     setView('outline')
   }
 
+  const openHome = () => {
+    setView('home')
+    setAiOpen(false)
+    setMobileNavOpen(false)
+  }
+
   const createNovel = (title: string, genre: string, synopsis: string) => {
     const project = createProject(title, genre, synopsis)
     replaceData((current) => ({
@@ -478,11 +566,10 @@ function App() {
       <Sidebar
         activeView={view}
         activeProject={activeProject}
-        projects={data.projects}
         mobileOpen={mobileNavOpen}
         theme={data.settings.theme}
         onSelectView={selectView}
-        onSwitchProject={switchProject}
+        onOpenHome={openHome}
         onAiCreate={() => setAiCreateOpen(true)}
         onCloseMobile={() => setMobileNavOpen(false)}
         onToggleTheme={() => setData((current) => {
@@ -505,7 +592,7 @@ function App() {
           </button>
           <div className="topbar-title">
             <span>{viewMeta[view].label}</span>
-            {activeProject ? <span className="project-breadcrumb">/ {activeProject.title}</span> : null}
+            {activeProject && view !== 'home' ? <span className="project-breadcrumb">/ {activeProject.title}</span> : null}
           </div>
           <div className="topbar-actions">
             <button
@@ -524,12 +611,32 @@ function App() {
         </header>
 
         <div className="content-area">
-          {view !== 'settings' && !activeProject ? (
+          {view !== 'home' && view !== 'settings' && !activeProject ? (
             <EmptyWorkspace onAiCreate={() => setAiCreateOpen(true)} onManualCreate={() => setNewProjectOpen(true)} />
+          ) : null}
+          {view === 'home' ? (
+            <HomeDashboard
+              data={data}
+              onOpenProject={switchProject}
+              onCreate={() => setAiCreateOpen(true)}
+              onDeleteProject={(project) => {
+                if (window.confirm(`确定删除《${project.title}》吗？`)) {
+                  const trash: TrashItem = { id: uid(), kind: 'project', title: project.title, deletedAt: now(), payload: project }
+                  replaceData((current) => ({
+                    ...current,
+                    projects: current.projects.filter((item) => item.id !== project.id),
+                    activeProjectId: current.activeProjectId === project.id ? current.projects.find((item) => item.id !== project.id)?.id ?? null : current.activeProjectId,
+                  }))
+                  try { localStorage.setItem('mogu-last-deleted-project', JSON.stringify(trash)) } catch { /* best effort */ }
+                  setToast('小说已删除，可在设置中恢复最近删除')
+                }
+              }}
+            />
           ) : null}
           {view === 'outline' && activeProject ? (
             <OutlineEditor
               project={activeProject}
+              providers={data.settings.providers}
               selectedChapterId={selectedChapterId}
               onSelectChapter={setSelectedChapterId}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
@@ -668,6 +775,8 @@ function App() {
           }}
           onRestore={(chapterId) => {
             const timestamp = now()
+            const currentChapter = activeProject.chapters.find((item) => item.id === chapterId)
+            const backupContent = currentChapter?.aiRevisionBackup?.content
             updateProject(activeProject.id, (project) => ({
               ...project,
               chapters: project.chapters.map((chapter) => chapter.id === chapterId && chapter.aiRevisionBackup ? {
@@ -681,8 +790,23 @@ function App() {
                 updatedAt: timestamp,
               } : chapter),
             }))
+            if (currentChapter?.aiRevisionBackup) recordAiOperation(activeProject.id, {
+              chapterId,
+              chapterTitle: currentChapter.title,
+              action: 'restore',
+              prompt: '恢复 AI 修改前的正文',
+              beforeContent: currentChapter.content,
+              afterContent: backupContent ?? currentChapter.content,
+              providerId: data.settings.activeProviderId,
+              model: data.settings.providers.find((item) => item.id === data.settings.activeProviderId)?.model ?? '',
+              tokens: 0,
+            })
             setToast('已恢复 AI 修改前的正文')
           }}
+          onPersistMemory={(chapterId, messages) => persistAiMemory(activeProject.id, chapterId, messages)}
+          onRecordUsage={(usage, source, words, chapterId, usageProvider) => recordUsage(activeProject.id, usageProvider, usage, source, words, chapterId)}
+          onRecordOperation={(operation) => recordAiOperation(activeProject.id, operation)}
+          onUndoOperation={(operationId) => undoAiOperation(activeProject.id, operationId)}
         />
       ) : null}
 
@@ -694,6 +818,7 @@ function App() {
           data={data}
           onClose={() => setAiCreateOpen(false)}
           onCreate={createNovelFromAi}
+          onUsage={(usage, provider) => recordUsage(null, provider, usage, 'plan', 0)}
           onOpenSettings={() => { setAiCreateOpen(false); setView('settings') }}
           onManual={() => { setAiCreateOpen(false); setNewProjectOpen(true) }}
         />
@@ -706,18 +831,16 @@ function App() {
 interface SidebarProps {
   activeView: ViewId
   activeProject: NovelProject | null
-  projects: NovelProject[]
   mobileOpen: boolean
   theme: string
   onSelectView: (view: ViewId) => void
-  onSwitchProject: (id: string) => void
+  onOpenHome: () => void
   onAiCreate: () => void
   onCloseMobile: () => void
   onToggleTheme: () => void
 }
 
 function Sidebar(props: SidebarProps) {
-  const [favoritesOpen, setFavoritesOpen] = useState(false)
   const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches)
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -742,22 +865,9 @@ function Sidebar(props: SidebarProps) {
           <span>AI 智创作</span>
         </button>
 
-        <div className="favorites-menu">
-          <button className="nav-button favorites-button" onClick={() => setFavoritesOpen((open) => !open)} aria-expanded={favoritesOpen}>
-            <Heart size={19} /><span>我的关注</span>
-          </button>
-          {favoritesOpen ? (
-            <div className="favorites-popover">
-              {props.projects.length ? props.projects.map((project) => (
-                <button
-                  key={project.id}
-                  className={project.id === props.activeProject?.id ? 'active' : ''}
-                  onClick={() => { props.onSwitchProject(project.id); setFavoritesOpen(false) }}
-                ><i style={{ background: project.coverColor }} /><span>{project.title}</span></button>
-              )) : <button onClick={() => { props.onAiCreate(); setFavoritesOpen(false) }}><Plus size={15} /><span>创建第一部小说</span></button>}
-            </div>
-          ) : null}
-        </div>
+        <button className={`nav-button home-button ${props.activeView === 'home' ? 'active' : ''}`} onClick={props.onOpenHome}>
+          <Home size={19} /><span>首页</span>
+        </button>
 
         <nav className="main-nav" aria-label="主导航">
           <div className="sidebar-landscape" aria-hidden="true" />
@@ -885,8 +995,104 @@ function EmptyWorkspace({ onAiCreate, onManualCreate }: { onAiCreate: () => void
   )
 }
 
+function InkPet({ working = false }: { working?: boolean }) {
+  return (
+    <span className={`ink-pet-wrap ${working ? 'working' : ''}`}>
+      <img className="ink-pet" src="/ink-robot.svg" alt="" aria-hidden="true" />
+      {working ? <span className="ink-pet-spark" aria-hidden="true">✦</span> : null}
+    </span>
+  )
+}
+
+function HomeDashboard({
+  data,
+  onOpenProject,
+  onCreate,
+  onDeleteProject,
+}: {
+  data: AppData
+  onOpenProject: (projectId: string) => void
+  onCreate: () => void
+  onDeleteProject: (project: NovelProject) => void
+}) {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const allUsage = [
+    ...(data.aiUsage ?? []),
+    ...data.projects.flatMap((project) => project.aiUsage ?? []),
+  ]
+  const usageToday = allUsage.filter((item) => new Date(item.date).getTime() >= today.getTime())
+  const todayTokens = usageToday.reduce((sum, item) => sum + item.totalTokens, 0)
+  const todayWords = usageToday.reduce((sum, item) => sum + item.words, 0)
+  const totalWords = data.projects.reduce((sum, project) => sum + project.chapters.reduce((chapterSum, chapter) => chapterSum + countWords(chapter.content), 0), 0)
+  const modelUsage = [...allUsage.reduce((map, item) => {
+    const key = `${item.providerId}:${item.model}`
+    const existing = map.get(key)
+    map.set(key, {
+      providerId: item.providerId,
+      model: item.model,
+      tokens: (existing?.tokens ?? 0) + item.totalTokens,
+      calls: (existing?.calls ?? 0) + 1,
+    })
+    return map
+  }, new Map<string, { providerId: string; model: string; tokens: number; calls: number }>()).values()].sort((left, right) => right.tokens - left.tokens)
+  const formatNumber = (value: number) => value.toLocaleString('zh-CN')
+  const formatDate = (value: number) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }).format(new Date(value))
+  const runningProject = data.projects.find((project) => project.generation?.status === 'generating')
+  const runningProvider = data.settings.providers.find((provider) => provider.id === runningProject?.generation?.providerId)
+  const modelHeadline = runningProvider?.model || modelUsage[0]?.model || '尚未使用'
+  const modelDetail = runningProject?.generation
+    ? `正在生成《${runningProject.title}》· ${runningProvider?.name ?? runningProject.generation.providerId}`
+    : modelUsage[0] ? `${formatNumber(modelUsage[0].tokens)} Token · ${modelUsage[0].calls} 次调用` : '配置模型后开始创作'
+
+  return (
+    <div className="home-dashboard page-scroll">
+      <div className="home-dashboard-head">
+        <div>
+          <span className="home-eyebrow"><span />MOGOU CREATIVE OS</span>
+          <h1>你的故事，<em>正在发生。</em></h1>
+          <p>所有作品、每一次思考和每一行新字，都在这里留下轨迹。</p>
+        </div>
+        <button className="primary-button home-create-button" onClick={onCreate}><Sparkles size={17} />开始一部新小说<ArrowUpRight size={16} /></button>
+      </div>
+
+      <section className="home-stats" aria-label="创作统计">
+        <article className="home-stat-card featured"><div className="home-stat-icon"><BarChart3 size={19} /></div><span>今日 Token</span><strong>{formatNumber(todayTokens)}</strong><small>{usageToday.length ? `${usageToday.length} 次 AI 调用` : '今天还没有 AI 调用'}</small></article>
+        <article className="home-stat-card"><div className="home-stat-icon"><Feather size={19} /></div><span>今日 AI 产出</span><strong>{formatNumber(todayWords)} <small>字</small></strong><small>来自生成、续写与修订</small></article>
+        <article className="home-stat-card"><div className="home-stat-icon"><BookOpenText size={19} /></div><span>作品总字数</span><strong>{formatNumber(totalWords)} <small>字</small></strong><small>{data.projects.length} 部作品 · {data.projects.reduce((sum, project) => sum + project.chapters.length, 0)} 个章节</small></article>
+        <article className={`home-stat-card ${runningProject ? 'model-running' : ''}`}><div className="home-stat-icon"><Bot size={19} /></div><span>{runningProject ? '正在使用模型' : '主要模型'}</span><strong>{modelHeadline}</strong><small>{modelDetail}</small></article>
+      </section>
+
+      <div className="home-content-grid">
+        <section className="home-projects-section">
+          <div className="home-section-head"><div><span className="home-section-kicker">YOUR LIBRARY</span><h2>作品空间</h2></div><span>{data.projects.length} 部作品</span></div>
+          {data.projects.length ? (
+            <div className="home-project-grid">
+              {data.projects.map((project) => {
+                const words = project.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0)
+                const doneChapters = project.chapters.filter((chapter) => chapter.content.trim()).length
+                return <article className="home-project-card" key={project.id} onClick={() => onOpenProject(project.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onOpenProject(project.id) }}>
+                  <div className="project-card-cover" style={{ '--project-cover': project.coverColor } as CSSProperties}><span>{project.title.slice(0, 1)}</span><i /></div>
+                  <div className="project-card-body"><div className="project-card-top"><span>{project.genre || '未分类'}</span><button className="project-delete-button" onClick={(event) => { event.stopPropagation(); onDeleteProject(project) }} aria-label={`删除《${project.title}》`} title="删除作品"><Trash2 size={15} /></button></div><h3>{project.title}</h3><p>{project.synopsis || '还没有简介，从第一章开始吧。'}</p><div className="project-card-meta"><span>{doneChapters} / {project.chapters.length} 章</span><span>{formatNumber(words)} 字</span><span>{formatDate(project.updatedAt)}</span></div><div className="project-card-footer"><span className="project-card-open">打开作品 <ArrowUpRight size={14} /></span><span className="project-card-bar"><i style={{ width: `${project.chapters.length ? Math.min(100, Math.round(doneChapters / project.chapters.length * 100)) : 0}%` }} /></span></div></div>
+                </article>
+              })}
+            </div>
+          ) : (
+            <div className="home-empty-projects"><div className="home-empty-mark"><Feather size={25} /></div><h3>还没有作品</h3><p>从一个念头开始，建立你的第一座故事世界。</p><button className="primary-button" onClick={onCreate}><Plus size={16} />创建第一部小说</button></div>
+          )}
+        </section>
+
+        <aside className="home-usage-panel"><div className="home-section-head"><div><span className="home-section-kicker">AI TOKEN METER</span><h2>模型用量</h2></div><span>累计</span></div><div className="usage-pet-display"><div className="usage-token-primary"><span>今日 Token</span><strong>{formatNumber(todayTokens)}</strong><small>{usageToday.length ? `${usageToday.length} 次 AI 调用 · ${formatNumber(todayWords)} 字产出` : '今天还没有 AI 调用'}</small><i><span style={{ width: `${Math.min(100, Math.max(7, Math.round(todayTokens / 1000)))}%` }} /></i></div><div className="usage-pet-art"><InkPet working={todayTokens > 0} /><span className="usage-pet-label">AI 机器人</span></div></div>{modelUsage.length ? <div className="model-usage-list">{modelUsage.slice(0, 5).map((item, index) => <div className="model-usage-row" key={`${item.providerId}:${item.model}`}><span className={`model-usage-rank rank-${index + 1}`}>{String(index + 1).padStart(2, '0')}</span><ProviderMark id={item.providerId} /><span className="model-usage-name"><strong>{item.model}</strong><small>{item.calls} 次调用</small></span><span className="model-usage-tokens">{formatNumber(item.tokens)}<small> Token</small></span></div>)}</div> : <div className="home-usage-empty"><Bot size={24} /><p>使用 AI 后<br />这里会显示模型用量</p></div>}<div className="home-usage-foot"><Clock3 size={13} />统计数据保存在本地浏览器</div></aside>
+      </div>
+
+      <div className="home-dashboard-foot"><span><ShieldCheck size={14} />本地优先 · 你的创作数据只属于你</span><span>最近更新 {data.projects[0] ? formatDate(data.projects[0].updatedAt) : '今天'}</span></div>
+    </div>
+  )
+}
+
 interface OutlineEditorProps {
   project: NovelProject
+  providers: AppData['settings']['providers']
   selectedChapterId: string | null
   onSelectChapter: (id: string) => void
   onUpdate: (updater: (project: NovelProject) => NovelProject) => void
@@ -897,11 +1103,14 @@ interface OutlineEditorProps {
   onResume: () => void
 }
 
-function OutlineEditor({ project, selectedChapterId, onSelectChapter, onUpdate, aiOpen, onToggleAi, onToast, onPause, onResume }: OutlineEditorProps) {
+function OutlineEditor({ project, providers, selectedChapterId, onSelectChapter, onUpdate, aiOpen, onToggleAi, onToast, onPause, onResume }: OutlineEditorProps) {
   const [query, setQuery] = useState('')
   const [chapterSettingsOpen, setChapterSettingsOpen] = useState(false)
   const [chapterSearchOpen, setChapterSearchOpen] = useState(false)
   const [previewMode, setPreviewMode] = useState(false)
+  const liveCopyRef = useRef<HTMLDivElement | null>(null)
+  const liveFollowRef = useRef(true)
+  const [liveFollowing, setLiveFollowing] = useState(true)
   const chapter = project.chapters.find((item) => item.id === selectedChapterId) ?? null
   const filteredChapters = useMemo(() => {
     const keyword = query.trim().toLowerCase()
@@ -909,6 +1118,18 @@ function OutlineEditor({ project, selectedChapterId, onSelectChapter, onUpdate, 
     return project.chapters.filter((item) => `${item.title} ${item.summary}`.toLowerCase().includes(keyword))
   }, [project.chapters, query])
   const totalWords = project.chapters.reduce((sum, item) => sum + countWords(item.content), 0)
+  useEffect(() => {
+    const element = liveCopyRef.current
+    if (!element || chapter?.generationStatus !== 'generating' || !liveFollowRef.current) return
+    element.scrollTo({ top: element.scrollHeight, behavior: 'auto' })
+  }, [chapter?.content, chapter?.generationStatus])
+  useEffect(() => {
+    if (chapter?.generationStatus === 'generating') {
+      liveFollowRef.current = true
+      setLiveFollowing(true)
+      liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight })
+    }
+  }, [chapter?.id, chapter?.generationStatus])
   const patchChapter = (patch: Partial<Chapter>) => {
     if (!chapter) return
     onUpdate((current) => ({
@@ -949,7 +1170,7 @@ function OutlineEditor({ project, selectedChapterId, onSelectChapter, onUpdate, 
   return (
     <>
       <div className="editor-workspace">
-        <GenerationBanner project={project} onPause={onPause} onResume={onResume} />
+        <GenerationBanner project={project} providers={providers} onPause={onPause} onResume={onResume} />
         <div className="editor-main">
           <aside className="chapter-panel">
             <div className="chapter-panel-head">
@@ -1028,10 +1249,17 @@ function OutlineEditor({ project, selectedChapterId, onSelectChapter, onUpdate, 
                       <span><span className="live-sigil">☯</span>{chapter.workflowStage ? workflowStageLabels[chapter.workflowStage] : 'AI 正在生成'}</span>
                       <small>{countWords(chapter.content).toLocaleString()} 字</small>
                     </div>
-                    <div className="live-manuscript-copy">
+                    <div className="live-manuscript-copy" ref={liveCopyRef} onScroll={(event) => {
+                      const element = event.currentTarget
+                      const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+                      const following = distance < 48
+                      liveFollowRef.current = following
+                      setLiveFollowing(following)
+                    }}>
                       {chapter.content || <span className="live-placeholder">正在组织开篇场景与人物行动</span>}
                       <i className="streaming-caret" />
                     </div>
+                    {!liveFollowing ? <button className="live-follow-button" type="button" onClick={() => { liveFollowRef.current = true; setLiveFollowing(true); liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight, behavior: 'smooth' }) }}><ArrowDownToLine size={13} />跟随最新内容</button> : null}
                   </div>
                 ) : previewMode ? (
                   <div className="manuscript manuscript-preview">{chapter.content || <span className="live-placeholder">本章暂无正文</span>}</div>
@@ -1133,13 +1361,14 @@ function ChapterSettingsDialog({ chapter, onClose, onSave }: { chapter: Chapter;
   )
 }
 
-function GenerationBanner({ project, onPause, onResume }: { project: NovelProject; onPause: () => void; onResume: () => void }) {
+function GenerationBanner({ project, providers, onPause, onResume }: { project: NovelProject; providers: AppData['settings']['providers']; onPause: () => void; onResume: () => void }) {
   const generation = project.generation
   const done = project.chapters.filter((chapter) => chapter.generationStatus === 'done').length
   const progress = generation ? Math.round((done / Math.max(1, generation.totalChapters)) * 100) : 0
   const active = generation ? project.chapters[generation.currentChapterIndex] : undefined
   const stage = active?.workflowStage ? workflowStageLabels[active.workflowStage] : '等待继续'
   const modeLabel = generation?.qualityMode === 'fanqie' ? '番茄发布版' : generation?.qualityMode === 'standard' ? '标准成稿' : '快速初稿'
+  const provider = providers.find((item) => item.id === generation?.providerId)
   const status = generation?.status ?? 'idle'
   const statusLabel = status === 'generating'
     ? `${stage} · 第 ${generation!.currentChapterIndex + 1} / ${generation!.totalChapters} 章`
@@ -1159,7 +1388,7 @@ function GenerationBanner({ project, onPause, onResume }: { project: NovelProjec
       </div>
       <div className="generation-copy">
         <div className="generation-progress"><span style={{ width: `${progress}%` }} /></div>
-        <small>{generation ? modeLabel : `${project.chapters.length} 章 · ${project.genre}`}{generation?.error ? ` · ${generation.error}` : ''}</small>
+        <small>{generation ? `${modeLabel} · ${provider ? `${provider.name} · ${provider.model}` : '模型未找到'}` : `${project.chapters.length} 章 · ${project.genre}`}{generation?.error ? ` · ${generation.error}` : ''}</small>
       </div>
       {status === 'generating' ? (
         <button className="generation-action secondary-button compact" onClick={onPause}><Pause size={14} />暂停</button>
@@ -1618,6 +1847,10 @@ interface AiPanelProps {
   onInsert: (chapterId: string, text: string) => void
   onReplace: (chapterId: string, text: string) => void
   onRestore: (chapterId: string) => void
+  onPersistMemory: (chapterId: string, messages: AiMessage[]) => void
+  onRecordUsage: (usage: AiUsage, source: AiUsageRecord['source'], words: number, chapterId: string | undefined, provider: { id: string; model: string }) => void
+  onRecordOperation: (operation: Omit<AiOperation, 'id' | 'createdAt'>) => void
+  onUndoOperation: (operationId: string) => void
 }
 
 type AiPanelMode = 'auto' | 'takeover'
@@ -1657,7 +1890,7 @@ const normalizeAiChapter = (value: string) => value
   .replace(/\s*```$/, '')
   .trim()
 
-function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onRestore }: AiPanelProps) {
+function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onRestore, onPersistMemory, onRecordUsage, onRecordOperation, onUndoOperation }: AiPanelProps) {
   const [messages, setMessages] = useState<AiMessage[]>([])
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<AiPanelMode>('auto')
@@ -1669,6 +1902,7 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
   const [revisionSourceContent, setRevisionSourceContent] = useState('')
   const [revisionSourceUpdatedAt, setRevisionSourceUpdatedAt] = useState(0)
   const [responseComplete, setResponseComplete] = useState(false)
+  const [responseUsage, setResponseUsage] = useState<AiUsage | null>(null)
   const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false)
   const [panelPosition, setPanelPosition] = useState<AiPanelPosition | null>(null)
   const [panelDragging, setPanelDragging] = useState(false)
@@ -1728,7 +1962,7 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
   }, [onClose, streaming])
   useEffect(() => {
     abortRef.current?.abort()
-    setMessages([])
+    setMessages((project.aiMemory ?? []).filter((item) => item.chapterId === chapter?.id).map(({ role, content }) => ({ role, content })))
     setInput('')
     setStreaming(false)
     setError('')
@@ -1738,6 +1972,7 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
     setRevisionSourceContent('')
     setRevisionSourceUpdatedAt(0)
     setResponseComplete(false)
+    setResponseUsage(null)
     setReplaceConfirmOpen(false)
   }, [project.id, chapter?.id])
 
@@ -1767,7 +2002,7 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
       const requestMessages: AiMessage[] = turnIntent === 'takeover' && chapter
         ? [...messages, { role: 'user', content: buildChapterTakeoverPrompt(project, chapter.id, cleanPrompt) }]
         : nextMessages
-      await streamChat({
+      const usage = await streamChat({
         provider,
         project,
         chapterTitle: chapter?.title,
@@ -1782,6 +2017,10 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
           setMessages([...nextMessages, { role: 'assistant', content: answer }])
         },
       })
+      setResponseUsage(usage)
+      onRecordUsage(usage, turnIntent === 'chat' ? 'chat' : 'revision', countWords(answer), chapter?.id, provider)
+      const completedMessages = [...nextMessages, { role: 'assistant' as const, content: answer }]
+      if (chapter) onPersistMemory(chapter.id, completedMessages)
       setResponseComplete(Boolean(answer.trim()))
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'AI 请求失败')
@@ -1819,9 +2058,20 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
 
   const applyTakeover = () => {
     if (!chapter || !takeoverReady || responseStale || responseApplied) return
+    const beforeContent = chapter.content
     onReplace(chapter.id, normalizedResponse)
+    onRecordOperation({ chapterId: chapter.id, chapterTitle: chapter.title, action: 'replace', prompt: messages.filter((message) => message.role === 'user').at(-1)?.content || '章节 AI 修订', beforeContent, afterContent: normalizedResponse, providerId: provider?.id || '', model: provider?.model || '', tokens: responseUsage?.totalTokens ?? 0 })
     setReplaceConfirmOpen(false)
   }
+
+  const applyAppend = () => {
+    if (!chapter || !appendReady) return
+    const beforeContent = chapter.content
+    onInsert(chapter.id, normalizedResponse)
+    onRecordOperation({ chapterId: chapter.id, chapterTitle: chapter.title, action: 'insert', prompt: messages.filter((message) => message.role === 'user').at(-1)?.content || '章节 AI 续写', beforeContent, afterContent: `${beforeContent}${beforeContent ? '\n\n' : ''}${normalizedResponse.trim()}`, providerId: provider?.id || '', model: provider?.model || '', tokens: responseUsage?.totalTokens ?? 0 })
+  }
+
+  const recentOperations = (project.aiOperations ?? []).filter((operation) => operation.chapterId === chapter?.id).slice(-4).reverse()
 
   const startPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!desktopPanel || !event.isPrimary || event.button !== 0 || !panelRef.current) return
@@ -1893,7 +2143,7 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
         onPointerCancel={stopPanelDrag}
         onLostPointerCapture={() => { panelDragRef.current = null; setPanelDragging(false) }}
       >
-        <div className="ai-panel-identity"><AiMark className="ai-panel-mark" /><span><strong>章节 AI 助手</strong><small>{chapter?.title ?? '未选择章节'} · {provider?.name}</small></span></div>
+        <div className="ai-panel-identity"><AiMark className="ai-panel-mark" /><span><strong>章节 AI 助手</strong><small>{chapter?.title ?? '未选择章节'} · 仅限本章 · {provider?.name}</small></span></div>
         <button type="button" className="ai-panel-drag-handle" onKeyDown={movePanelWithKeyboard} aria-label="拖动 AI 面板" title="拖动 AI 面板"><GripHorizontal size={19} /></button>
         <button className="icon-button" onClick={onClose} aria-label="关闭章节 AI 助手"><X size={19} /></button>
       </div>
@@ -1924,10 +2174,17 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
       {!streaming && (takeoverReady || appendReady) ? (
         <div className="ai-result-actions" role="status">
           <span>{takeoverReady ? `${countWords(normalizedResponse).toLocaleString()} 字修订候选稿 · 尚未写入` : `${countWords(normalizedResponse).toLocaleString()} 字续写`}</span>
-          {appendReady && chapter ? <button type="button" className="secondary-button compact" onClick={() => onInsert(chapter.id, normalizedResponse)}><FilePlus2 size={15} />追加到正文</button> : null}
+          {appendReady && chapter ? <button type="button" className="secondary-button compact" onClick={applyAppend}><FilePlus2 size={15} />追加到本章</button> : null}
           {takeoverReady && responseStale ? <em>正文已变化，请重新生成候选稿</em> : null}
           {takeoverReady && responseApplied ? <em className="applied"><Check size={13} />{chapter?.aiRevisionBackup ? '本版本已应用' : '候选稿与正文相同'}</em> : null}
           {takeoverReady && !responseStale && !responseApplied ? <button type="button" className="primary-button compact" onClick={() => setReplaceConfirmOpen(true)}><Replace size={15} />预览并替换</button> : null}
+        </div>
+      ) : null}
+
+      {chapter && recentOperations.length ? (
+        <div className="ai-operation-history">
+          <div className="ai-history-head"><span><RotateCcw size={13} />本章操作记录</span><small>本地保存 · 可回退</small></div>
+          {recentOperations.map((operation) => <div className="ai-operation-row" key={operation.id}><span className={`ai-operation-dot ${operation.action}`} /><span className="ai-operation-copy"><strong>{operation.action === 'replace' ? 'AI 修订本章' : operation.action === 'insert' ? 'AI 续写本章' : '已回退上一操作'}</strong><small>{new Date(operation.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} · {operation.model || '本地记录'}</small></span>{operation.action !== 'restore' ? <button type="button" onClick={() => onUndoOperation(operation.id)}><Undo2 size={13} />回退</button> : null}</div>)}
         </div>
       ) : null}
 
@@ -1962,12 +2219,14 @@ function AiCreateDialog({
   data,
   onClose,
   onCreate,
+  onUsage,
   onOpenSettings,
   onManual,
 }: {
   data: AppData
   onClose: () => void
   onCreate: (plan: AiNovelPlan, request: AiNovelRequest) => void
+  onUsage: (usage: AiUsage, provider: { id: string; model: string }) => void
   onOpenSettings: () => void
   onManual: () => void
 }) {
@@ -1982,22 +2241,36 @@ function AiCreateDialog({
     qualityMode: 'standard',
   })
   const [planning, setPlanning] = useState(false)
+  const [planningStage, setPlanningStage] = useState(0)
   const [error, setError] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const provider = data.settings.providers.find((item) => item.id === request.providerId)
 
+  const qualityModes: Array<{ id: AiNovelRequest['qualityMode']; name: string; caption: string; stages: string }> = [
+    { id: 'draft', name: '快速初稿', caption: '每章 1 次生成', stages: '大纲规划 → 分章写作' },
+    { id: 'standard', name: '标准成稿', caption: '每章约 3 次调用', stages: '写作 → 审稿 → 系统修订' },
+    { id: 'fanqie', name: '番茄发布版', caption: '每章约 4 次调用', stages: '写作 → 审稿 → 修订 → 番茄终审' },
+  ]
+
   useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => {
+    if (!planning) return
+    setPlanningStage(0)
+    const timer = window.setInterval(() => setPlanningStage((current) => Math.min(3, current + 1)), 1150)
+    return () => window.clearInterval(timer)
+  }, [planning])
   const patch = <K extends keyof AiNovelRequest>(key: K, value: AiNovelRequest[K]) => setRequest((current) => ({ ...current, [key]: value }))
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (!request.idea.trim() || !provider || planning) return
     if (!provider.apiKey.trim()) return setError(`请先填写 ${provider.name} API Key`)
+    setPlanningStage(0)
     setPlanning(true)
     setError('')
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      const plan = await generateNovelPlan(provider, request, controller.signal)
+      const plan = await generateNovelPlan(provider, request, controller.signal, (usage) => onUsage(usage, provider))
       onCreate(plan, request)
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : '生成大纲失败')
@@ -2007,12 +2280,6 @@ function AiCreateDialog({
     }
   }
 
-  const qualityModes: Array<{ id: AiNovelRequest['qualityMode']; name: string; caption: string; stages: string }> = [
-    { id: 'draft', name: '快速初稿', caption: '每章 1 次生成', stages: '大纲规划 → 分章写作' },
-    { id: 'standard', name: '标准成稿', caption: '每章约 3 次调用', stages: '写作 → 审稿 → 系统修订' },
-    { id: 'fanqie', name: '番茄发布版', caption: '每章约 4 次调用', stages: '写作 → 审稿 → 修订 → 番茄终审' },
-  ]
-
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !planning) onClose() }}>
       <form className="dialog ai-create-dialog" onSubmit={(event) => void submit(event)}>
@@ -2020,6 +2287,7 @@ function AiCreateDialog({
           <div><span className="dialog-icon"><Sparkles size={20} /></span><span><h2>AI 一键创作</h2><p>从一个想法生成设定、大纲和全书正文</p></span></div>
           <button type="button" className="icon-button" onClick={onClose} disabled={planning} aria-label="关闭"><X size={19} /></button>
         </div>
+        {planning && provider ? <CreationPlanningOverlay provider={provider} request={request} stage={planningStage} onCancel={() => abortRef.current?.abort()} /> : <>
         <div className="dialog-body ai-create-body">
           <Field label="核心创意">
             <textarea autoFocus value={request.idea} onChange={(event) => patch('idea', event.target.value)} rows={5} placeholder="例如：一个专门替死者投递遗书的快递员，收到了一封写给自己的信……" />
@@ -2075,8 +2343,55 @@ function AiCreateDialog({
             {planning ? <><LoaderCircle className="spin" size={17} />正在规划全书</> : <><Sparkles size={17} />生成整部小说</>}
           </button>
         </div>
+        </>}
       </form>
     </div>
+  )
+}
+
+const creationStages = [
+  { title: '解析故事核心', caption: '提炼人物欲望、冲突与世界基线' },
+  { title: '建立世界与角色', caption: '让关系、规则和伏笔彼此咬合' },
+  { title: '编排章节节拍', caption: '为每一章安排目标、阻力与钩子' },
+  { title: '写入创作工作台', caption: '正在准备逐章生成与质量流程' },
+]
+
+function CreationPlanningOverlay({
+  provider,
+  request,
+  stage,
+  onCancel,
+}: {
+  provider: AppData['settings']['providers'][number]
+  request: AiNovelRequest
+  stage: number
+  onCancel: () => void
+}) {
+  const qualityLabel = request.qualityMode === 'fanqie' ? '番茄发布版' : request.qualityMode === 'standard' ? '标准成稿' : '快速初稿'
+  const currentStage = creationStages[stage]
+  return (
+    <section className="creation-planning" aria-live="polite" aria-label="正在规划全书">
+      <div className="creation-writing-scene" aria-hidden="true">
+        <div className="creation-paper-sheet"><i /><i /><i /><i /><i /></div>
+        <div className="creation-ink-line" />
+        <span className="creation-feather"><Feather size={37} /></span>
+        <span className="creation-ink-dot dot-one" /><span className="creation-ink-dot dot-two" /><span className="creation-ink-dot dot-three" />
+      </div>
+      <div className="creation-planning-copy">
+        <span className="creation-eyebrow"><span />INKFORGE STORY ENGINE</span>
+        <h2>正在为你的故事<br /><em>落下第一笔。</em></h2>
+        <p>{currentStage.caption}</p>
+      </div>
+      <div className="creation-model-card">
+        <span className="creation-model-label">本次使用模型</span>
+        <div><ProviderMark id={provider.id} /><span><strong>{provider.name}</strong><small>{provider.model}</small></span><i><Bot size={14} />在线</i></div>
+        <small className="creation-quality">{qualityLabel} · {request.chapterCount} 章 · 每章约 {request.wordsPerChapter.toLocaleString()} 字</small>
+      </div>
+      <div className="creation-stage-list">
+        {creationStages.map((item, index) => <div className={`creation-stage ${index < stage ? 'done' : index === stage ? 'active' : ''}`} key={item.title}><span>{index < stage ? <Check size={12} /> : String(index + 1).padStart(2, '0')}</span><strong>{item.title}</strong><i /></div>)}
+      </div>
+      <div className="creation-planning-foot"><span><LoaderCircle className="spin" size={14} />{currentStage.title}</span><button type="button" onClick={onCancel}>停止规划</button></div>
+    </section>
   )
 }
 
