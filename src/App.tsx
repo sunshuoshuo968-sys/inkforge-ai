@@ -733,7 +733,7 @@ function Sidebar(props: SidebarProps) {
       {props.mobileOpen ? <button className="nav-scrim" onClick={props.onCloseMobile} aria-label="关闭导航" /> : null}
       <aside className={`sidebar ${props.mobileOpen ? 'mobile-open' : ''}`}>
         <div className="sidebar-brand">
-          <img className="brand-art" src="/design-brand-v2.png" alt="墨构 MOGOU STUDIO" />
+          <img className="brand-art" src="/mogou-logo-transparent-enhanced.png" alt="墨构 MOGOU STUDIO" />
           <button className="icon-button close-mobile" onClick={props.onCloseMobile} aria-label="关闭导航"><X size={19} /></button>
         </div>
 

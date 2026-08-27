@@ -1,50 +1,73 @@
 <div align="center">
-  <img src="./public/design-brand-v2.png" alt="墨构 MOGOU STUDIO" width="290" />
-  <h1>InkForge AI</h1>
-  <p><strong>让灵感，长成一部作品。</strong></p>
-  <p>一套为长篇小说而生的 AI 创作工作台。<br />从一句念头，到一条完整、连贯、可持续的故事线。</p>
-
-  <p>
-    <a href="#快速开始">快速开始</a> ·
-    <a href="#创作闭环">创作闭环</a> ·
-    <a href="#ai-协作方式">AI 协作方式</a> ·
-    <a href="#隐私与数据">隐私与数据</a>
-  </p>
-
-  <p>
-    <img src="https://img.shields.io/badge/React-19-202b27?style=flat-square&logo=react&logoColor=9fe3cc" alt="React 19" />
-    <img src="https://img.shields.io/badge/TypeScript-5-202b27?style=flat-square&logo=typescript&logoColor=9fe3cc" alt="TypeScript 5" />
-    <img src="https://img.shields.io/badge/Vite-5-202b27?style=flat-square&logo=vite&logoColor=e6b47b" alt="Vite 5" />
-    <img src="https://img.shields.io/badge/Local--first-your%20stories-202b27?style=flat-square&logo=shield&logoColor=e6b47b" alt="Local first" />
-  </p>
-</div>
 
 <br />
+
+<img src="./public/mogou-logo-transparent-enhanced.png" alt="墨构 MOGOU STUDIO" width="390" />
+
+<h1>InkForge AI</h1>
+
+<p><code>LONG-FORM FICTION / WITH A MEMORY</code></p>
+
+<p><strong>让灵感，长成一部作品。</strong></p>
+
+<p>一套真正为长篇小说而生的 AI 创作工作台。<br />不是帮你生成几段文字，而是陪你把一个故事走到最后。</p>
+
+<br />
+
+<a href="#快速开始">快速开始</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+<a href="#为什么是墨构">为什么是墨构</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+<a href="#创作闭环">创作闭环</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+<a href="#隐私与数据">隐私与数据</a>
+
+<br /><br />
+
+<img src="https://img.shields.io/badge/React-19-202b27?style=flat-square&logo=react&logoColor=9fe3cc" alt="React 19" />
+<img src="https://img.shields.io/badge/TypeScript-5-202b27?style=flat-square&logo=typescript&logoColor=9fe3cc" alt="TypeScript 5" />
+<img src="https://img.shields.io/badge/Vite-5-202b27?style=flat-square&logo=vite&logoColor=e6b47b" alt="Vite 5" />
+<img src="https://img.shields.io/badge/Local--first-your%20stories-202b27?style=flat-square&logo=shield&logoColor=e6b47b" alt="Local first" />
+
+<br /><br />
+
+</div>
 
 <div align="center">
-  <img src="./qa/desktop-editor.png" alt="墨构章节编辑工作台" width="92%" />
+  <img src="./qa/desktop-editor.png" alt="墨构章节编辑工作台" width="94%" />
 </div>
 
 <br />
 
-## 不是另一个聊天框
+## 为什么是墨构
 
-长篇写作真正难的，从来不是“写出一段话”。
+写长篇，真正难的不是写出第一章。
 
-难的是：写到第三十章时，角色仍然像他自己；写到故事后半程时，伏笔仍然有回声；灵感不断涌来时，作品不会被碎片淹没。
+难的是写到第三十章时，角色仍然像他自己；写到故事后半程时，伏笔仍然有回声；灵感不断涌来时，作品不会被碎片淹没。
 
 **墨构把 AI 从一次性生成器，变成一套能陪你走完全程的创作系统。**
 
-你负责想象、判断和取舍；墨构负责整理上下文、展开可能性、执行写作流程，并在每一个章节节点帮你保持故事的方向感。
+你负责想象、判断和取舍。墨构负责整理上下文、展开可能性、执行写作流程，并在每一个章节节点帮你保持故事的方向感。
 
-## 创作闭环
+<br />
 
 <table>
   <tr>
-    <td width="25%"><strong>01 · 种下灵感</strong><br /><sub>一句话、一个画面，或一个挥之不去的问题。</sub></td>
-    <td width="25%"><strong>02 · 建立世界</strong><br /><sub>人物、规则、关系与命运开始彼此咬合。</sub></td>
-    <td width="25%"><strong>03 · 展开章节</strong><br /><sub>目标、阻力、代价与章末钩子清晰可见。</sub></td>
-    <td width="25%"><strong>04 · 留下笔迹</strong><br /><sub>AI 扩展可能性，你决定故事最终的方向。</sub></td>
+    <td align="center" width="33%"><strong>STORY ENGINE</strong><br /><sub>把一句灵感展开成一条有因果的故事线</sub></td>
+    <td align="center" width="33%"><strong>MEMORY LAYER</strong><br /><sub>让角色、设定与伏笔在长篇里始终保持连贯</sub></td>
+    <td align="center" width="33%"><strong>QUALITY LOOP</strong><br /><sub>让每一章都经过写作、审读与修订</sub></td>
+  </tr>
+</table>
+
+## 创作闭环
+
+一个念头，不必一次想清楚整本书。
+
+墨构会在每一个关键节点给你足够的方向，也留下足够的自由：
+
+<table>
+  <tr>
+    <td width="25%" valign="top"><strong>01 · 种下灵感</strong><br /><sub>一句话、一个画面，或一个挥之不去的问题。</sub></td>
+    <td width="25%" valign="top"><strong>02 · 长出世界</strong><br /><sub>人物、规则、关系与命运开始彼此咬合。</sub></td>
+    <td width="25%" valign="top"><strong>03 · 展开章节</strong><br /><sub>目标、阻力、代价与章末钩子清晰可见。</sub></td>
+    <td width="25%" valign="top"><strong>04 · 留下笔迹</strong><br /><sub>AI 扩展可能性，你决定故事最终的方向。</sub></td>
   </tr>
 </table>
 
@@ -53,30 +76,37 @@
 <table>
   <tr>
     <td width="33%" valign="top">
-      <h3>✦ 一键展开整部小说</h3>
-      <p>从核心创意出发，生成作品定位、角色、世界观、主线、支线与分章大纲。不是随机拼接，而是一条有因果的故事线。</p>
+      <h3>✦ 从一句话到整部小说</h3>
+      <p>从核心创意出发，展开作品定位、角色弧光、世界规则、主线、支线与分章钩子。让灵感从“有意思”变成“写得下去”。</p>
     </td>
     <td width="33%" valign="top">
-      <h3>◌ 记得住的故事大脑</h3>
-      <p>角色、时间线、伏笔、设定事实与章节记忆集中沉淀。写到长篇后半程，也不会丢掉最初的那束光。</p>
+      <h3>◌ 一个记得住的故事大脑</h3>
+      <p>角色、时间线、伏笔、设定事实与章节记忆集中沉淀。故事越写越长，脉络反而越来越清楚。</p>
     </td>
     <td width="33%" valign="top">
       <h3>↗ 每一章都值得发布</h3>
-      <p>写作、审读、修订、终审四段质量流程，让灵感落地时依然有节奏、有张力、有完成度。</p>
+      <p>写作、审读、修订、终审四段质量流程，让每一次更新都更接近你心里真正想要的样子。</p>
     </td>
   </tr>
 </table>
 
-## AI 协作方式
+## AI 协作，不越过你的边界
 
 AI 不应该在你没有确认的情况下改掉你的正文。因此，墨构把“讨论”和“执行”明确分开：
 
-| 工作方式 | 你可以做什么 | 正文是否自动改变 |
+| 工作方式 | 适合做什么 | 正文状态 |
 | --- | --- | --- |
-| **智能对话** | 讨论开篇、节奏、人物动机、场景扩写和一致性问题 | **不会** |
-| **接管本章** | 根据你的要求生成完整候选修订稿，预览后决定是否应用 | **确认后才会** |
+| **智能对话** | 讨论开篇、节奏、人物动机、场景扩写和一致性问题 | 不会自动修改 |
+| **接管本章** | 按你的要求生成候选修订稿，预览后决定是否应用 | 确认后才修改 |
 
 接管修订时，原文会自动保留为可恢复版本。你可以大胆试错，也可以随时回到上一版。
+
+<br />
+
+<div align="center">
+  <img src="./qa/desktop-ai-takeover.png" alt="章节 AI 接管与修订" width="48%" />
+  <img src="./qa/desktop-memory.png" alt="章节记忆与时间线" width="48%" />
+</div>
 
 ## 一章的完整质量流程
 
@@ -90,9 +120,7 @@ AI 不应该在你没有确认的情况下改掉你的正文。因此，墨构�
    └────── 每个阶段都可暂停、查看、调整与恢复 ──────┘
 ```
 
-可选模式：
-
-| 模式 | 适合场景 | 调用流程 |
+| 模式 | 适合场景 | 工作流 |
 | --- | --- | --- |
 | **快速初稿** | 快速铺开故事骨架 | 大纲规划 → 分章写作 |
 | **标准成稿** | 日常连载与稳定产出 | 写作 → 审读 → 系统修订 |
@@ -100,14 +128,7 @@ AI 不应该在你没有确认的情况下改掉你的正文。因此，墨构�
 
 ## 工作台一览
 
-<div align="center">
-  <img src="./qa/desktop-ai-takeover.png" alt="章节 AI 接管与修订" width="49%" />
-  <img src="./qa/desktop-memory.png" alt="章节记忆与时间线" width="49%" />
-</div>
-
-<br />
-
-| 模块 | 作用 |
+| 模块 | 你可以做什么 |
 | --- | --- |
 | **章节编辑器** | 在沉浸式正文区域中写作、预览、统计字数与设置目标 |
 | **角色库** | 管理角色身份、动机、冲突、标签与关系变化 |
@@ -129,14 +150,14 @@ AI 不应该在你没有确认的情况下改掉你的正文。因此，墨构�
 
 ## 隐私与数据
 
-**Local-first · 你的故事，默认只留在你的浏览器里。**
+> **Local-first · 你的故事，默认只留在你的浏览器里。**
 
 - 作品数据默认保存于浏览器本地存储
 - API Key 仅保存在当前浏览器的应用设置中
 - 不会把 API Key 写入仓库文件
 - 支持完整导出与导入，方便备份与迁移
 
-> 更换浏览器、清理站点数据或重装系统前，请先在「设置」中导出备份。
+更换浏览器、清理站点数据或重装系统前，请先在「设置」中导出备份。
 
 ## 快速开始
 
@@ -152,11 +173,7 @@ pnpm install
 pnpm dev
 ```
 
-打开终端显示的本地地址，默认通常为：
-
-```text
-http://127.0.0.1:5173
-```
+打开终端显示的本地地址，默认通常为 `http://127.0.0.1:5173`。
 
 ### 构建与预览
 
@@ -179,19 +196,6 @@ pnpm preview
 pnpm typecheck
 pnpm build
 pnpm verify:ui
-```
-
-## 项目结构
-
-```text
-src/
-├── App.tsx       # 应用界面、工作台与交互流程
-├── ai.ts         # AI 请求与流式响应
-├── data.ts       # 作品、章节与默认数据模型
-├── storage.ts    # 本地保存、导入与导出
-├── types.ts      # TypeScript 类型定义
-├── workflows.ts  # 写作、审读、修订与终审提示词
-└── styles.css    # 全局主题与响应式界面样式
 ```
 
 ## 技术栈
