@@ -37,7 +37,7 @@
     "productName": "墨构",
     "copyright": "Copyright © InkForge",
     "directories": {
-      "output": "release"
+      "output": "moGou"
     },
     "files": [
       "dist/**/*",
