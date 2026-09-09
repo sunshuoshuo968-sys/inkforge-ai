@@ -37,7 +37,7 @@
   <tr>
     <td align="center" width="33%"><strong>STORY ENGINE</strong><br /><sub>从一句灵感，展开为可执行的故事线</sub></td>
     <td align="center" width="33%"><strong>MEMORY LAYER</strong><br /><sub>人物、设定、时间线和伏笔持续连贯</sub></td>
-    <td align="center" width="33%"><strong>QUALITY LOOP</strong><br /><sub>写作、审读、修订与终审逐章发生</sub></td>
+    <td align="center" width="33%"><strong>QUALITY LOOP</strong><br /><sub>写作、审读与修订逐章发生</sub></td>
   </tr>
 </table>
 
@@ -56,9 +56,9 @@
    ↓
 故事设定 · 人物关系 · 世界规则 · 章节节拍
    ↓
-分章写作 ──→ AI 审读 ──→ 系统修订 ──→ 发布终审
-   │             │             │             │
-   └──────── 每一步都可查看、调整与回退 ────────┘
+分章写作 ──→ AI 审读 ──→ 系统修订
+   │             │             │
+   └────── 每一步都可查看、调整与回退 ──────┘
 ```
 
 <table>

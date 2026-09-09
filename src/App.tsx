@@ -16,6 +16,7 @@ import {
   Eye,
   EyeOff,
   Feather,
+  FlaskConical,
   FilePenLine,
   FilePlus2,
   FileText,
@@ -52,9 +53,10 @@ import {
   Undo2,
   UserRound,
   UsersRound,
+  WandSparkles,
   X,
   type LucideIcon,
-} from 'lucide-react'
+} from "lucide-react";
 import {
   type CSSProperties,
   type ChangeEvent,
@@ -67,10 +69,77 @@ import {
   useMemo,
   useRef,
   useState,
-} from 'react'
-import { completeChat, generateNovelPlan, streamChat, type AiUsage } from './ai'
-import { countWords, createAiProject, createChapter, createProject, defaultData, now, uid } from './data'
-import { exportData, loadData, parseImport, saveData } from './storage'
+} from "react";
+import {
+  completeChat,
+  extractLoreFromImportedBook,
+  generateNovelPlan,
+  listProviderModels,
+  normalizeAiNovelRequest,
+  runBackfillSummaries,
+  runChapterDigests,
+  runCharacterTimelines,
+  runConsistencyAudit,
+  runContinueOutline,
+  runOutlineDrift,
+  runPostSeasoningCapture,
+  runSettingGapReport,
+  runStyleFingerprint,
+  streamChat,
+  supplementLoreFromChapters,
+  testProviderConnection,
+  type AiUsage,
+} from "./ai";
+import {
+  appendIdeaReport,
+  appendContinueOutlineChapters,
+  applyChapterDigests,
+  applyChapterSummaries,
+  applyGapFills,
+  applyImportedLore,
+  applyStyleFingerprint,
+  applyTimelineAndArcs,
+  countWords,
+  createAiProject,
+  createChapter,
+  createProject,
+  createSequelProject,
+  defaultData,
+  now,
+  supplementProjectLore,
+  uid,
+} from "./data";
+import {
+  ImportedBookToolkitDialog,
+  type ToolkitResult,
+  type ToolkitToolId,
+} from "./ImportedBookToolkit";
+import { SeasoningView } from "./SeasoningPanel";
+import {
+  assessSeasoningDraft,
+  estimateContextBudget,
+  type SeasoningDraft,
+} from "./seasoning";
+import { exportData, loadData, parseImport, saveData } from "./storage";
+import {
+  isEpubFileName,
+  isTxtFileName,
+  parseEpubFile,
+} from "./epub";
+import {
+  TXT_CONFIRM_BYTES,
+  buildImportLoreSample,
+  buildSelectedChaptersSample,
+  createProjectFromTxtAsync,
+  describeTxtFileRisk,
+  estimateWordsFast,
+  exportProjectAsTxt,
+  readTxtFile,
+  splitTxtIntoChaptersAsync,
+  summarizeTxtChapters,
+  titleFromFileName,
+  type TxtChapterSlice,
+} from "./txt";
 import type {
   AiMessage,
   AiOperation,
@@ -80,78 +149,120 @@ import type {
   AppData,
   Character,
   Chapter,
+  ImportedBookLore,
   MemoryCategory,
   MemoryItem,
   NoteItem,
   NovelProject,
   TrashItem,
   ViewId,
-} from './types'
-import { buildChapterTakeoverPrompt, buildDraftPrompt, buildFanqiePrompt, buildReviewPrompt, buildRevisionPrompt, writingWorkflows } from './workflows'
+} from "./types";
+import {
+  PLOT_SAFE_BRIDGE_INSTRUCTION,
+  PLOT_SAFE_POLISH_INSTRUCTION,
+  buildBackfillSummariesPrompt,
+  buildBridgePolishPrompt,
+  buildChapterDigestPrompt,
+  buildChapterTakeoverPrompt,
+  buildCharacterTimelinePrompt,
+  buildConsistencyAuditPrompt,
+  buildContinueNextChapterPrompt,
+  buildContinueOutlinePrompt,
+  buildDraftPrompt,
+  buildOutlineDriftPrompt,
+  buildPostSeasoningCapturePrompt,
+  buildReviewPrompt,
+  buildRevisionPrompt,
+  buildSeasoningEnrichInstruction,
+  buildSettingGapPrompt,
+  buildStyleFingerprintPrompt,
+  buildWeakChapterRewritePrompt,
+  getBridgeChapterTargets,
+  parseBridgePolishResult,
+  scopeProjectForContinue,
+  writingWorkflows,
+  type BridgeChapterDraft,
+} from "./workflows";
 
 const viewMeta: Record<ViewId, { label: string; icon: typeof BookOpenText }> = {
-  home: { label: '首页', icon: Home },
-  outline: { label: '大纲', icon: BookOpenText },
-  characters: { label: '角色', icon: UsersRound },
-  world: { label: '世界观', icon: Globe2 },
-  plot: { label: '情节', icon: BrainCircuit },
-  memory: { label: '时间线', icon: BookMarked },
-  ideas: { label: '灵感', icon: Lightbulb },
-  trash: { label: '回收站', icon: Trash2 },
-  settings: { label: '设置', icon: Settings },
-}
+  home: { label: "首页", icon: Home },
+  outline: { label: "大纲", icon: BookOpenText },
+  characters: { label: "角色", icon: UsersRound },
+  world: { label: "世界观", icon: Globe2 },
+  plot: { label: "情节", icon: BrainCircuit },
+  memory: { label: "时间线", icon: BookMarked },
+  seasoning: { label: "加料", icon: FlaskConical },
+  ideas: { label: "灵感", icon: Lightbulb },
+  trash: { label: "回收站", icon: Trash2 },
+  settings: { label: "设置", icon: Settings },
+};
 
 const noteConfig = {
   world: {
-    title: '世界观',
-    empty: '从一条规则、一座城市或一个时代开始',
-    add: '新建设定',
-    categories: ['地点', '规则', '历史', '势力', '物件'],
+    title: "世界观",
+    empty: "从一条规则、一座城市或一个时代开始",
+    add: "新建设定",
+    categories: ["地点", "规则", "历史", "势力", "物件"],
   },
   plot: {
-    title: '情节',
-    empty: '记录主线、支线、伏笔和关键转折',
-    add: '新建情节',
-    categories: ['主线', '支线', '伏笔', '转折', '结局'],
+    title: "情节",
+    empty: "记录主线、支线、伏笔和关键转折",
+    add: "新建情节",
+    categories: ["主线", "支线", "伏笔", "转折", "结局"],
   },
   ideas: {
-    title: '灵感',
-    empty: '随手记下一句对白、一个场景或一个念头',
-    add: '记录灵感',
-    categories: ['场景', '对白', '点子', '素材', '待整理'],
+    title: "灵感",
+    empty: "随手记下一句对白、一个场景或一个念头",
+    add: "记录灵感",
+    categories: ["场景", "对白", "点子", "素材", "待整理"],
   },
-} as const
+} as const;
 
-const workflowStageLabels: Record<NonNullable<Chapter['workflowStage']>, string> = {
-  drafting: '正在起草正文',
-  reviewing: '正在审读章节',
-  revising: '正在执行修订',
-  auditing: '正在进行发布终审',
-}
+const workflowStageLabels: Record<
+  NonNullable<Chapter["workflowStage"]>,
+  string
+> = {
+  drafting: "正在起草正文",
+  reviewing: "正在审读章节",
+  revising: "正在执行修订",
+};
 
 const memoryCategoryLabels: Record<MemoryCategory, string> = {
-  canon: '设定事实',
-  character: '人物关系',
-  timeline: '时间线',
-  foreshadowing: '伏笔',
-  style: '文风约束',
-  chapter: '章节摘要',
-}
+  canon: "设定事实",
+  character: "人物关系",
+  timeline: "时间线",
+  foreshadowing: "伏笔",
+  style: "文风约束",
+  chapter: "章节摘要",
+};
 
 function App() {
-  const [data, setData] = useState<AppData>(defaultData)
-  const [ready, setReady] = useState(false)
-  const [view, setView] = useState<ViewId>('home')
-  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null)
-  const [newProjectOpen, setNewProjectOpen] = useState(false)
-  const [aiCreateOpen, setAiCreateOpen] = useState(false)
-  const [aiOpen, setAiOpen] = useState(false)
-  const [mobileNavOpen, setMobileNavOpen] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
-  const saveTimer = useRef<number | undefined>(undefined)
-  const dataRef = useRef(data)
-  const generationAbortRef = useRef<AbortController | null>(null)
-  const generationRunningRef = useRef(false)
+  const [data, setData] = useState<AppData>(defaultData);
+  const [ready, setReady] = useState(false);
+  const [view, setView] = useState<ViewId>("home");
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(
+    null,
+  );
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [aiCreateOpen, setAiCreateOpen] = useState(false);
+  const [importTxtOpen, setImportTxtOpen] = useState(false);
+  const [toolkitOpen, setToolkitOpen] = useState(false);
+  const [toolkitBusy, setToolkitBusy] = useState(false);
+  const [toolkitResult, setToolkitResult] = useState<ToolkitResult | null>(
+    null,
+  );
+  const toolkitFillsRef = useRef<ImportedBookLore | null>(null);
+  const toolkitDriftFixesRef = useRef<
+    Array<{ index: number; summary: string }>
+  >([]);
+  const toolkitBridgeDraftsRef = useRef<BridgeChapterDraft[]>([]);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const saveTimer = useRef<number | undefined>(undefined);
+  const dataRef = useRef(data);
+  const generationAbortRef = useRef<AbortController | null>(null);
+  const generationRunningRef = useRef(false);
 
   useEffect(() => {
     loadData()
@@ -161,404 +272,1638 @@ function App() {
           settings: {
             ...stored.settings,
             providers: [
-              ...stored.settings.providers.map((provider) => provider.id === 'kimi' && provider.model === 'moonshot-v1-8k'
-                ? {
-                    ...provider,
-                    baseUrl: provider.baseUrl.replace(/\/+$/, '') === 'https://api.moonshot.cn'
-                      ? 'https://api.moonshot.cn/v1'
-                      : provider.baseUrl,
-                    model: 'kimi-k2.6',
-                  }
-                : provider),
-              ...defaultData.settings.providers.filter((provider) => (
-                !stored.settings.providers.some((storedProvider) => storedProvider.id === provider.id)
-              )),
+              ...stored.settings.providers.map((provider) =>
+                provider.id === "kimi" && provider.model === "moonshot-v1-8k"
+                  ? {
+                      ...provider,
+                      baseUrl:
+                        provider.baseUrl.replace(/\/+$/, "") ===
+                        "https://api.moonshot.cn"
+                          ? "https://api.moonshot.cn/v1"
+                          : provider.baseUrl,
+                      model: "kimi-k2.6",
+                      breakArmorPrompt: provider.breakArmorPrompt ?? "",
+                    }
+                  : {
+                      ...provider,
+                      breakArmorPrompt: provider.breakArmorPrompt ?? "",
+                    },
+              ),
+              ...defaultData.settings.providers.filter(
+                (provider) =>
+                  !stored.settings.providers.some(
+                    (storedProvider) => storedProvider.id === provider.id,
+                  ),
+              ),
             ],
           },
           aiUsage: stored.aiUsage ?? [],
           projects: stored.projects.map((project) => ({
             ...project,
+            generation: project.generation
+              ? {
+                  ...project.generation,
+                  // Older saves used the removed "fanqie" quality mode.
+                  qualityMode:
+                    String(project.generation.qualityMode) === "fanqie"
+                      ? ("standard" as const)
+                      : project.generation.qualityMode,
+                }
+              : undefined,
             memories: project.memories ?? [],
+            seasoningScenes: project.seasoningScenes ?? [],
+            seasoningSignals: project.seasoningSignals ?? [],
+            seasoningRules: project.seasoningRules ?? [],
             aiMemory: project.aiMemory ?? [],
             aiOperations: project.aiOperations ?? [],
             aiUsage: project.aiUsage ?? [],
-            ...(project.generation?.status === 'generating' ? {
-              generation: { ...project.generation, status: 'paused' as const },
-              chapters: project.chapters.map((chapter) => chapter.generationStatus === 'generating'
-                ? { ...chapter, generationStatus: 'pending', workflowStage: undefined }
-                : chapter),
-            } : {}),
+            ...(project.generation?.status === "generating"
+              ? {
+                  generation: {
+                    ...project.generation,
+                    status: "paused" as const,
+                  },
+                  chapters: project.chapters.map((chapter) =>
+                    chapter.generationStatus === "generating"
+                      ? {
+                          ...chapter,
+                          generationStatus: "pending",
+                          workflowStage: undefined,
+                        }
+                      : chapter,
+                  ),
+                }
+              : {}),
           })),
-        }
-        dataRef.current = normalized
-        setData(normalized)
-        const active = normalized.projects.find((project) => project.id === normalized.activeProjectId)
-        setSelectedChapterId(active?.chapters[0]?.id ?? null)
+        };
+        dataRef.current = normalized;
+        setData(normalized);
+        const active = normalized.projects.find(
+          (project) => project.id === normalized.activeProjectId,
+        );
+        setSelectedChapterId(active?.chapters[0]?.id ?? null);
       })
-      .catch(() => setToast('读取本地数据失败，已创建空白工作区'))
-      .finally(() => setReady(true))
-  }, [])
-
-  useEffect(() => { dataRef.current = data }, [data])
+      .catch(() => setToast("读取本地数据失败，已创建空白工作区"))
+      .finally(() => setReady(true));
+  }, []);
 
   useEffect(() => {
-    if (!ready) return
-    window.clearTimeout(saveTimer.current)
+    dataRef.current = data;
+  }, [data]);
+
+  useEffect(() => {
+    if (!ready) return;
+    window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      void saveData(data).catch(() => setToast('自动保存失败，请导出备份'))
-    }, 500)
-    return () => window.clearTimeout(saveTimer.current)
-  }, [data, ready])
+      void saveData(data).catch(() => setToast("自动保存失败，请导出备份"));
+    }, 500);
+    return () => window.clearTimeout(saveTimer.current);
+  }, [data, ready]);
 
   useEffect(() => {
-    const root = document.documentElement
-    root.dataset.theme = data.settings.theme
-    root.style.setProperty('--editor-font-size', `${data.settings.fontSize}px`)
-    root.dataset.editorFont = data.settings.fontFamily
-  }, [data.settings.theme, data.settings.fontFamily, data.settings.fontSize])
+    const root = document.documentElement;
+    root.dataset.theme = data.settings.theme;
+    root.style.setProperty("--editor-font-size", `${data.settings.fontSize}px`);
+    root.dataset.editorFont = data.settings.fontFamily;
+  }, [data.settings.theme, data.settings.fontFamily, data.settings.fontSize]);
 
   useEffect(() => {
-    if (!toast) return
-    const timer = window.setTimeout(() => setToast(null), 2800)
-    return () => window.clearTimeout(timer)
-  }, [toast])
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const activeProject = useMemo(
-    () => data.projects.find((project) => project.id === data.activeProjectId) ?? null,
+    () =>
+      data.projects.find((project) => project.id === data.activeProjectId) ??
+      null,
     [data.projects, data.activeProjectId],
-  )
+  );
 
   useEffect(() => {
     if (!activeProject) {
-      setSelectedChapterId(null)
-      return
+      setSelectedChapterId(null);
+      return;
     }
-    if (!activeProject.chapters.some((chapter) => chapter.id === selectedChapterId)) {
-      setSelectedChapterId(activeProject.chapters[0]?.id ?? null)
+    if (
+      !activeProject.chapters.some(
+        (chapter) => chapter.id === selectedChapterId,
+      )
+    ) {
+      setSelectedChapterId(activeProject.chapters[0]?.id ?? null);
     }
-  }, [activeProject, selectedChapterId])
+  }, [activeProject, selectedChapterId]);
 
   const replaceData = useCallback((updater: (current: AppData) => AppData) => {
-    const next = updater(dataRef.current)
-    dataRef.current = next
-    setData(next)
-  }, [])
+    const next = updater(dataRef.current);
+    dataRef.current = next;
+    setData(next);
+  }, []);
 
-  const updateProject = useCallback((projectId: string, updater: (project: NovelProject) => NovelProject) => {
-    replaceData((current) => ({
-      ...current,
-      projects: current.projects.map((project) => (
-        project.id === projectId ? { ...updater(project), updatedAt: now() } : project
-      )),
-    }))
-  }, [replaceData])
+  const updateProject = useCallback(
+    (projectId: string, updater: (project: NovelProject) => NovelProject) => {
+      replaceData((current) => ({
+        ...current,
+        projects: current.projects.map((project) =>
+          project.id === projectId
+            ? { ...updater(project), updatedAt: now() }
+            : project,
+        ),
+      }));
+    },
+    [replaceData],
+  );
 
-  const recordUsage = useCallback((projectId: string | null, provider: { id: string; model: string }, usage: AiUsage, source: AiUsageRecord['source'], words: number, chapterId?: string) => {
-    const record: AiUsageRecord = {
-      id: uid(),
-      date: new Date().toISOString(),
-      providerId: provider.id,
-      model: provider.model,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      totalTokens: usage.totalTokens,
-      words,
-      source,
-      chapterId,
-    }
-    replaceData((current) => projectId
-      ? {
-          ...current,
-          projects: current.projects.map((project) => project.id === projectId
-            ? { ...project, aiUsage: [...(project.aiUsage ?? []), record].slice(-200), updatedAt: now() }
-            : project),
-        }
-      : { ...current, aiUsage: [...(current.aiUsage ?? []), record].slice(-200) })
-  }, [replaceData])
+  const recordUsage = useCallback(
+    (
+      projectId: string | null,
+      provider: { id: string; model: string },
+      usage: AiUsage,
+      source: AiUsageRecord["source"],
+      words: number,
+      chapterId?: string,
+    ) => {
+      const record: AiUsageRecord = {
+        id: uid(),
+        date: new Date().toISOString(),
+        providerId: provider.id,
+        model: provider.model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        totalTokens: usage.totalTokens,
+        words,
+        source,
+        chapterId,
+      };
+      replaceData((current) =>
+        projectId
+          ? {
+              ...current,
+              projects: current.projects.map((project) =>
+                project.id === projectId
+                  ? {
+                      ...project,
+                      aiUsage: [...(project.aiUsage ?? []), record].slice(-200),
+                      updatedAt: now(),
+                    }
+                  : project,
+              ),
+            }
+          : {
+              ...current,
+              aiUsage: [...(current.aiUsage ?? []), record].slice(-200),
+            },
+      );
+    },
+    [replaceData],
+  );
 
-  const persistAiMemory = useCallback((projectId: string, chapterId: string, messages: AiMessage[]) => {
-    updateProject(projectId, (project) => ({
-      ...project,
-      aiMemory: [
-        ...(project.aiMemory ?? []).filter((item) => item.chapterId !== chapterId),
-        ...messages.slice(-40).map((message) => ({ id: uid(), chapterId, role: message.role, content: message.content, createdAt: now() })),
-      ],
-    }))
-  }, [updateProject])
-
-  const recordAiOperation = useCallback((projectId: string, operation: Omit<AiOperation, 'id' | 'createdAt'>) => {
-    updateProject(projectId, (project) => ({
-      ...project,
-      aiOperations: [...(project.aiOperations ?? []), { ...operation, id: uid(), createdAt: now() }].slice(-50),
-    }))
-  }, [updateProject])
-
-  const undoAiOperation = useCallback((projectId: string, operationId: string) => {
-    updateProject(projectId, (project) => {
-      const operation = (project.aiOperations ?? []).find((item) => item.id === operationId)
-      if (!operation) return project
-      const chapter = project.chapters.find((item) => item.id === operation.chapterId)
-      if (!chapter) return project
-      const restored = { ...chapter, content: operation.beforeContent, updatedAt: now() }
-      return {
+  const persistAiMemory = useCallback(
+    (projectId: string, chapterId: string, messages: AiMessage[]) => {
+      updateProject(projectId, (project) => ({
         ...project,
-        chapters: project.chapters.map((item) => item.id === chapter.id ? restored : item),
-        aiOperations: [...(project.aiOperations ?? []), {
-          ...operation,
-          id: uid(),
-          action: 'restore' as const,
-          prompt: `回退：${operation.prompt}`,
-          beforeContent: chapter.content,
-          afterContent: operation.beforeContent,
-          createdAt: now(),
-        }].slice(-50),
-      }
-    })
-    setToast('已回退本章上一次 AI 操作')
-  }, [setToast, updateProject])
+        aiMemory: [
+          ...(project.aiMemory ?? []).filter(
+            (item) => item.chapterId !== chapterId,
+          ),
+          ...messages.slice(-40).map((message) => ({
+            id: uid(),
+            chapterId,
+            role: message.role,
+            content: message.content,
+            createdAt: now(),
+          })),
+        ],
+      }));
+    },
+    [updateProject],
+  );
 
-  const streamChapterStage = useCallback(async (
-    project: NovelProject,
-    chapterIndex: number,
-    prompt: string,
-    stage: Chapter['workflowStage'],
-    signal: AbortSignal,
-  ) => {
-    const provider = dataRef.current.settings.providers.find((item) => item.id === project.generation?.providerId)
-    if (!provider) throw new Error('生成所用的 AI 提供商已不存在')
-    let output = ''
-    let lastPaint = 0
-    const usage = await streamChat({
-      provider,
-      project,
-      chapterTitle: project.chapters[chapterIndex].title,
-      chapterContent: project.chapters[chapterIndex].content,
-      messages: [{ role: 'user', content: prompt }],
-      signal,
-      onChunk: (chunk) => {
-        output += chunk
-        const tick = performance.now()
-        if (tick - lastPaint < 80) return
-        lastPaint = tick
-        updateProject(project.id, (current) => ({
-          ...current,
-          chapters: current.chapters.map((chapter, index) => index === chapterIndex
-            ? { ...chapter, content: output, workflowStage: stage, updatedAt: now() }
-            : chapter),
-        }))
-      },
-    })
-    recordUsage(project.id, provider, usage, stage === 'drafting' ? 'generation' : stage === 'reviewing' ? 'review' : 'revision', countWords(output), project.chapters[chapterIndex].id)
-    updateProject(project.id, (current) => ({
-      ...current,
-      chapters: current.chapters.map((chapter, index) => index === chapterIndex
-        ? { ...chapter, content: output, workflowStage: stage, updatedAt: now() }
-        : chapter),
-    }))
-    return output
-  }, [recordUsage, updateProject])
+  const recordAiOperation = useCallback(
+    (projectId: string, operation: Omit<AiOperation, "id" | "createdAt">) => {
+      updateProject(projectId, (project) => ({
+        ...project,
+        aiOperations: [
+          ...(project.aiOperations ?? []),
+          { ...operation, id: uid(), createdAt: now() },
+        ].slice(-50),
+      }));
+    },
+    [updateProject],
+  );
 
-  const runGeneration = useCallback(async (projectId: string) => {
-    if (generationRunningRef.current) return
-    generationRunningRef.current = true
-    const controller = new AbortController()
-    generationAbortRef.current = controller
-    let activeChapterIndex = -1
-    try {
-      while (!controller.signal.aborted) {
-        let project = dataRef.current.projects.find((item) => item.id === projectId)
-        if (!project?.generation || project.generation.status !== 'generating') break
-        const chapterIndex = project.chapters.findIndex((chapter) => (
-          chapter.generationStatus === 'pending' || chapter.generationStatus === 'error' || chapter.generationStatus === 'generating'
-        ))
-        if (chapterIndex < 0) {
+  const undoAiOperation = useCallback(
+    (projectId: string, operationId: string) => {
+      updateProject(projectId, (project) => {
+        const operation = (project.aiOperations ?? []).find(
+          (item) => item.id === operationId,
+        );
+        if (!operation) return project;
+        const chapter = project.chapters.find(
+          (item) => item.id === operation.chapterId,
+        );
+        if (!chapter) return project;
+        const restored = {
+          ...chapter,
+          content: operation.beforeContent,
+          updatedAt: now(),
+        };
+        return {
+          ...project,
+          chapters: project.chapters.map((item) =>
+            item.id === chapter.id ? restored : item,
+          ),
+          aiOperations: [
+            ...(project.aiOperations ?? []),
+            {
+              ...operation,
+              id: uid(),
+              action: "restore" as const,
+              prompt: `回退：${operation.prompt}`,
+              beforeContent: chapter.content,
+              afterContent: operation.beforeContent,
+              createdAt: now(),
+            },
+          ].slice(-50),
+        };
+      });
+      setToast("已回退本章上一次 AI 操作");
+    },
+    [setToast, updateProject],
+  );
+
+  const streamChapterStage = useCallback(
+    async (
+      project: NovelProject,
+      chapterIndex: number,
+      prompt: string,
+      stage: Chapter["workflowStage"],
+      signal: AbortSignal,
+    ) => {
+      const provider = dataRef.current.settings.providers.find(
+        (item) => item.id === project.generation?.providerId,
+      );
+      if (!provider) throw new Error("生成所用的 AI 提供商已不存在");
+      let output = "";
+      let lastPaint = 0;
+      const usage = await streamChat({
+        provider,
+        project,
+        chapterTitle: project.chapters[chapterIndex].title,
+        chapterContent: project.chapters[chapterIndex].content,
+        messages: [{ role: "user", content: prompt }],
+        signal,
+        onChunk: (chunk) => {
+          output += chunk;
+          const tick = performance.now();
+          if (tick - lastPaint < 80) return;
+          lastPaint = tick;
+          updateProject(project.id, (current) => ({
+            ...current,
+            chapters: current.chapters.map((chapter, index) =>
+              index === chapterIndex
+                ? {
+                    ...chapter,
+                    content: output,
+                    workflowStage: stage,
+                    updatedAt: now(),
+                  }
+                : chapter,
+            ),
+          }));
+        },
+      });
+      recordUsage(
+        project.id,
+        provider,
+        usage,
+        stage === "drafting"
+          ? "generation"
+          : stage === "reviewing"
+            ? "review"
+            : "revision",
+        countWords(output),
+        project.chapters[chapterIndex].id,
+      );
+      updateProject(project.id, (current) => ({
+        ...current,
+        chapters: current.chapters.map((chapter, index) =>
+          index === chapterIndex
+            ? {
+                ...chapter,
+                content: output,
+                workflowStage: stage,
+                updatedAt: now(),
+              }
+            : chapter,
+        ),
+      }));
+      return output;
+    },
+    [recordUsage, updateProject],
+  );
+
+  const runGeneration = useCallback(
+    async (projectId: string) => {
+      if (generationRunningRef.current) return;
+      generationRunningRef.current = true;
+      const controller = new AbortController();
+      generationAbortRef.current = controller;
+      let activeChapterIndex = -1;
+      try {
+        while (!controller.signal.aborted) {
+          let project = dataRef.current.projects.find(
+            (item) => item.id === projectId,
+          );
+          if (
+            !project?.generation ||
+            project.generation.status !== "generating"
+          )
+            break;
+          const chapterIndex = project.chapters.findIndex(
+            (chapter) =>
+              chapter.generationStatus === "pending" ||
+              chapter.generationStatus === "error" ||
+              chapter.generationStatus === "generating",
+          );
+          if (chapterIndex < 0) {
+            updateProject(projectId, (current) => ({
+              ...current,
+              generation: current.generation
+                ? {
+                    ...current.generation,
+                    currentChapterIndex: current.chapters.length,
+                    status: "completed",
+                    error: undefined,
+                  }
+                : undefined,
+            }));
+            setToast(`《${project.title}》全书初稿已生成`);
+            break;
+          }
+
+          activeChapterIndex = chapterIndex;
           updateProject(projectId, (current) => ({
             ...current,
-            generation: current.generation ? {
-              ...current.generation,
-              currentChapterIndex: current.chapters.length,
-              status: 'completed',
-              error: undefined,
-            } : undefined,
-          }))
-          setToast(`《${project.title}》全书初稿已生成`)
-          break
-        }
+            generation: current.generation
+              ? {
+                  ...current.generation,
+                  currentChapterIndex: chapterIndex,
+                  error: undefined,
+                }
+              : undefined,
+            chapters: current.chapters.map((chapter, index) =>
+              index === chapterIndex
+                ? {
+                    ...chapter,
+                    content: "",
+                    generationStatus: "generating",
+                    workflowStage: "drafting",
+                    qualityNotes: undefined,
+                  }
+                : chapter,
+            ),
+          }));
+          if (dataRef.current.activeProjectId === projectId)
+            setSelectedChapterId(project.chapters[chapterIndex].id);
 
-        activeChapterIndex = chapterIndex
+          project = dataRef.current.projects.find(
+            (item) => item.id === projectId,
+          )!;
+          let content = await streamChapterStage(
+            project,
+            chapterIndex,
+            buildDraftPrompt(project, chapterIndex),
+            "drafting",
+            controller.signal,
+          );
+          const mode = project.generation!.qualityMode;
+          let review = "";
+          let reviewUsage: AiUsage | null = null;
+
+          if (mode === "standard") {
+            updateProject(projectId, (current) => ({
+              ...current,
+              chapters: current.chapters.map((chapter, index) =>
+                index === chapterIndex
+                  ? { ...chapter, workflowStage: "reviewing" }
+                  : chapter,
+              ),
+            }));
+            project = dataRef.current.projects.find(
+              (item) => item.id === projectId,
+            )!;
+            const provider = dataRef.current.settings.providers.find(
+              (item) => item.id === project!.generation?.providerId,
+            );
+            if (!provider) throw new Error("生成所用的 AI 提供商已不存在");
+            review = await completeChat({
+              provider,
+              project: project!,
+              prompt: buildReviewPrompt(project!, chapterIndex, content),
+              signal: controller.signal,
+              onUsage: (usage) => {
+                reviewUsage = usage;
+              },
+            });
+            if (reviewUsage)
+              recordUsage(
+                project!.id,
+                provider,
+                reviewUsage,
+                "review",
+                countWords(review),
+                project!.chapters[chapterIndex].id,
+              );
+            const score =
+              Number(
+                review.match(/(?:综合分数|综合评分)[：:\s]*(\d{1,3})/)?.[1] ||
+                  0,
+              ) || undefined;
+            updateProject(projectId, (current) => ({
+              ...current,
+              chapters: current.chapters.map((chapter, index) =>
+                index === chapterIndex
+                  ? {
+                      ...chapter,
+                      workflowStage: "revising",
+                      qualityScore: score,
+                      qualityNotes: [review.slice(0, 500)],
+                    }
+                  : chapter,
+              ),
+            }));
+            project = dataRef.current.projects.find(
+              (item) => item.id === projectId,
+            )!;
+            content = await streamChapterStage(
+              project,
+              chapterIndex,
+              buildRevisionPrompt(project, chapterIndex, content, review),
+              "revising",
+              controller.signal,
+            );
+          }
+
+          updateProject(projectId, (current) => {
+            const chapter = current.chapters[chapterIndex];
+            const existingMemory = current.memories.find(
+              (item) => item.sourceChapterId === chapter.id,
+            );
+            const generatedMemory =
+              chapter.memory?.trim() ||
+              `${chapter.summary}\n章节结尾：${content.slice(-400)}`;
+            const chapterMemory = {
+              id: existingMemory?.id ?? uid(),
+              title: `第${chapterIndex + 1}章记忆 · ${chapter.title}`,
+              content: existingMemory?.pinned
+                ? existingMemory.content
+                : generatedMemory,
+              category: "chapter" as const,
+              pinned: existingMemory?.pinned ?? false,
+              sourceChapterId: chapter.id,
+              updatedAt: now(),
+            };
+            return {
+              ...current,
+              generation: current.generation
+                ? {
+                    ...current.generation,
+                    currentChapterIndex: chapterIndex + 1,
+                  }
+                : undefined,
+              chapters: current.chapters.map((item, index) =>
+                index === chapterIndex
+                  ? {
+                      ...item,
+                      content,
+                      generationStatus: "done",
+                      workflowStage: undefined,
+                      status: "revising",
+                      updatedAt: now(),
+                    }
+                  : item,
+              ),
+              memories: existingMemory
+                ? current.memories.map((item) =>
+                    item.id === existingMemory.id ? chapterMemory : item,
+                  )
+                : [chapterMemory, ...current.memories],
+            };
+          });
+        }
+      } catch (error) {
+        const aborted = controller.signal.aborted;
         updateProject(projectId, (current) => ({
           ...current,
-          generation: current.generation ? { ...current.generation, currentChapterIndex: chapterIndex, error: undefined } : undefined,
-          chapters: current.chapters.map((chapter, index) => index === chapterIndex ? {
-            ...chapter,
-            content: '',
-            generationStatus: 'generating',
-            workflowStage: 'drafting',
-            qualityNotes: undefined,
-          } : chapter),
-        }))
-        if (dataRef.current.activeProjectId === projectId) setSelectedChapterId(project.chapters[chapterIndex].id)
-
-        project = dataRef.current.projects.find((item) => item.id === projectId)!
-        let content = await streamChapterStage(project, chapterIndex, buildDraftPrompt(project, chapterIndex), 'drafting', controller.signal)
-        const mode = project.generation!.qualityMode
-        let review = ''
-        let reviewUsage: AiUsage | null = null
-
-        if (mode === 'standard' || mode === 'fanqie') {
-          updateProject(projectId, (current) => ({
-            ...current,
-            chapters: current.chapters.map((chapter, index) => index === chapterIndex ? { ...chapter, workflowStage: 'reviewing' } : chapter),
-          }))
-          project = dataRef.current.projects.find((item) => item.id === projectId)!
-          const provider = dataRef.current.settings.providers.find((item) => item.id === project!.generation?.providerId)
-          if (!provider) throw new Error('生成所用的 AI 提供商已不存在')
-          review = await completeChat({ provider, project: project!, prompt: buildReviewPrompt(project!, chapterIndex, content), signal: controller.signal, onUsage: (usage) => { reviewUsage = usage } })
-          if (reviewUsage) recordUsage(project!.id, provider, reviewUsage, 'review', countWords(review), project!.chapters[chapterIndex].id)
-          const score = Number(review.match(/(?:综合分数|综合评分)[：:\s]*(\d{1,3})/)?.[1] || 0) || undefined
-          updateProject(projectId, (current) => ({
-            ...current,
-            chapters: current.chapters.map((chapter, index) => index === chapterIndex ? {
-              ...chapter,
-              workflowStage: 'revising',
-              qualityScore: score,
-              qualityNotes: [review.slice(0, 500)],
-            } : chapter),
-          }))
-          project = dataRef.current.projects.find((item) => item.id === projectId)!
-          content = await streamChapterStage(project, chapterIndex, buildRevisionPrompt(project, chapterIndex, content, review), 'revising', controller.signal)
-        }
-
-        if (mode === 'fanqie') {
-          project = dataRef.current.projects.find((item) => item.id === projectId)!
-          content = await streamChapterStage(project, chapterIndex, buildFanqiePrompt(project, chapterIndex, content), 'auditing', controller.signal)
-        }
-
-        updateProject(projectId, (current) => {
-          const chapter = current.chapters[chapterIndex]
-          const existingMemory = current.memories.find((item) => item.sourceChapterId === chapter.id)
-          const generatedMemory = chapter.memory?.trim() || `${chapter.summary}\n章节结尾：${content.slice(-400)}`
-          const chapterMemory = {
-            id: existingMemory?.id ?? uid(),
-            title: `第${chapterIndex + 1}章记忆 · ${chapter.title}`,
-            content: existingMemory?.pinned ? existingMemory.content : generatedMemory,
-            category: 'chapter' as const,
-            pinned: existingMemory?.pinned ?? false,
-            sourceChapterId: chapter.id,
-            updatedAt: now(),
-          }
-          return {
-            ...current,
-            generation: current.generation ? { ...current.generation, currentChapterIndex: chapterIndex + 1 } : undefined,
-            chapters: current.chapters.map((item, index) => index === chapterIndex ? {
-              ...item,
-              content,
-              generationStatus: 'done',
-              workflowStage: undefined,
-              status: 'revising',
-              updatedAt: now(),
-            } : item),
-            memories: existingMemory
-              ? current.memories.map((item) => item.id === existingMemory.id ? chapterMemory : item)
-              : [chapterMemory, ...current.memories],
-          }
-        })
+          generation: current.generation
+            ? {
+                ...current.generation,
+                status: aborted ? "paused" : "error",
+                error: aborted
+                  ? undefined
+                  : error instanceof Error
+                    ? error.message
+                    : "生成失败",
+              }
+            : undefined,
+          chapters: current.chapters.map((chapter, index) =>
+            index === activeChapterIndex
+              ? {
+                  ...chapter,
+                  generationStatus: aborted ? "pending" : "error",
+                  workflowStage: undefined,
+                }
+              : chapter,
+          ),
+        }));
+      } finally {
+        generationRunningRef.current = false;
+        generationAbortRef.current = null;
       }
-    } catch (error) {
-      const aborted = controller.signal.aborted
-      updateProject(projectId, (current) => ({
-        ...current,
-        generation: current.generation ? {
-          ...current.generation,
-          status: aborted ? 'paused' : 'error',
-          error: aborted ? undefined : error instanceof Error ? error.message : '生成失败',
-        } : undefined,
-        chapters: current.chapters.map((chapter, index) => index === activeChapterIndex ? {
-          ...chapter,
-          generationStatus: aborted ? 'pending' : 'error',
-          workflowStage: undefined,
-        } : chapter),
-      }))
-    } finally {
-      generationRunningRef.current = false
-      generationAbortRef.current = null
-    }
-  }, [streamChapterStage, updateProject])
+    },
+    [streamChapterStage, updateProject],
+  );
 
   useEffect(() => {
-    const job = data.projects.find((project) => project.generation?.status === 'generating')
-    if (job && !generationRunningRef.current) void runGeneration(job.id)
-  }, [data.projects, runGeneration])
+    const job = data.projects.find(
+      (project) => project.generation?.status === "generating",
+    );
+    if (job && !generationRunningRef.current) void runGeneration(job.id);
+  }, [data.projects, runGeneration]);
 
   const switchProject = (projectId: string) => {
-    const project = data.projects.find((item) => item.id === projectId)
-    replaceData((current) => ({ ...current, activeProjectId: projectId }))
-    setSelectedChapterId(project?.chapters[0]?.id ?? null)
-    setView('outline')
-  }
+    const project = data.projects.find((item) => item.id === projectId);
+    replaceData((current) => ({ ...current, activeProjectId: projectId }));
+    setSelectedChapterId(project?.chapters[0]?.id ?? null);
+    setView("outline");
+  };
 
   const openHome = () => {
-    setView('home')
-    setAiOpen(false)
-    setMobileNavOpen(false)
-  }
+    setView("home");
+    setAiOpen(false);
+    setMobileNavOpen(false);
+  };
 
   const createNovel = (title: string, genre: string, synopsis: string) => {
-    const project = createProject(title, genre, synopsis)
+    const project = createProject(title, genre, synopsis);
     replaceData((current) => ({
       ...current,
       projects: [project, ...current.projects],
       activeProjectId: project.id,
-    }))
-    setSelectedChapterId(project.chapters[0].id)
-    setView('outline')
-    setNewProjectOpen(false)
-  }
+    }));
+    setSelectedChapterId(project.chapters[0].id);
+    setView("outline");
+    setNewProjectOpen(false);
+  };
 
   const createNovelFromAi = (plan: AiNovelPlan, request: AiNovelRequest) => {
-    const project = createAiProject(plan, request)
+    const project = createAiProject(plan, request);
     replaceData((current) => ({
       ...current,
       projects: [project, ...current.projects],
       activeProjectId: project.id,
-    }))
-    setSelectedChapterId(project.chapters[0]?.id ?? null)
-    setView('outline')
-    setAiCreateOpen(false)
-    setToast('大纲已完成，开始逐章生成')
-  }
+    }));
+    setSelectedChapterId(project.chapters[0]?.id ?? null);
+    setView("outline");
+    setAiCreateOpen(false);
+    setToast("大纲已完成，开始逐章生成");
+  };
+
+  const createNovelFromTxt = (project: NovelProject, loreApplied = false) => {
+    replaceData((current) => ({
+      ...current,
+      projects: [project, ...current.projects],
+      activeProjectId: project.id,
+    }));
+    setSelectedChapterId(project.chapters[0]?.id ?? null);
+    setView("outline");
+    setImportTxtOpen(false);
+    setToast(
+      loreApplied
+        ? `已导入《${project.title}》并完成设定提炼（${project.characters.length} 角色）`
+        : `已导入《${project.title}》，共 ${project.chapters.length} 章`,
+    );
+  };
+
+  const extractLoreIntoProject = async (
+    project: NovelProject,
+    options?: { signal?: AbortSignal; replaceExisting?: boolean },
+  ) => {
+    const provider =
+      data.settings.providers.find(
+        (item) => item.id === data.settings.activeProviderId,
+      ) ?? data.settings.providers[0];
+    if (!provider) throw new Error("请先配置 AI 模型");
+    if (!provider.apiKey.trim())
+      throw new Error(`请先填写 ${provider.name} API Key`);
+    const { sample, sampledChapterIndexes, charCount } = buildImportLoreSample(
+      project.chapters,
+    );
+    const lore = await extractLoreFromImportedBook(
+      provider,
+      {
+        title: project.title,
+        genre: project.genre,
+        chapterCount: project.chapters.length,
+        sample,
+        sampleNote: `共抽样 ${sampledChapterIndexes.length} 章正文片段，约 ${charCount} 字（非全书）`,
+      },
+      options?.signal,
+      (usage) => recordUsage(project.id, provider, usage, "lore", 0),
+    );
+    return applyImportedLore(project, lore, {
+      replaceExisting: options?.replaceExisting ?? true,
+    });
+  };
+
+  const supplementLoreFromSelectedChapters = async (
+    project: NovelProject,
+    chapterIndexes: number[],
+    options?: { signal?: AbortSignal },
+  ) => {
+    const provider =
+      data.settings.providers.find(
+        (item) => item.id === data.settings.activeProviderId,
+      ) ?? data.settings.providers[0];
+    if (!provider) throw new Error("请先配置 AI 模型");
+    if (!provider.apiKey.trim())
+      throw new Error(`请先填写 ${provider.name} API Key`);
+    const uniqueIndexes = [...new Set(chapterIndexes)]
+      .filter(
+        (index) =>
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < project.chapters.length,
+      )
+      .slice(0, 3);
+    if (!uniqueIndexes.length) throw new Error("请至少选择 1 章");
+    const selected = uniqueIndexes.map((index) => {
+      const chapter = project.chapters[index];
+      return {
+        index,
+        title: chapter.title,
+        content: chapter.content,
+      };
+    });
+    if (selected.every((item) => !item.content.trim())) {
+      throw new Error("所选章节暂无正文，请先写入或选择有内容的章节");
+    }
+    const { sample, sampledChapterIndexes, charCount } =
+      buildSelectedChaptersSample(selected);
+    const lore = await supplementLoreFromChapters(
+      provider,
+      project,
+      {
+        sample,
+        sampleNote: `作者选定 ${sampledChapterIndexes.length} 章，约 ${charCount} 字，用于增量补充设定`,
+        chapterIndexes: sampledChapterIndexes,
+      },
+      options?.signal,
+      (usage) => recordUsage(project.id, provider, usage, "lore", 0),
+    );
+    return supplementProjectLore(project, lore, {
+      chapterIndexes: sampledChapterIndexes,
+    });
+  };
+
+  const resolveActiveProvider = () => {
+    const provider =
+      data.settings.providers.find(
+        (item) => item.id === data.settings.activeProviderId,
+      ) ?? data.settings.providers[0];
+    if (!provider) throw new Error("请先配置 AI 模型");
+    if (!provider.apiKey.trim())
+      throw new Error(`请先填写 ${provider.name} API Key`);
+    return provider;
+  };
+
+  const pickToolkitChapters = (
+    project: NovelProject,
+    chapterIndexes: number[],
+    max: number,
+  ) => {
+    const uniqueIndexes = [...new Set(chapterIndexes)]
+      .filter(
+        (index) =>
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < project.chapters.length,
+      )
+      .slice(0, max);
+    if (!uniqueIndexes.length) throw new Error("请至少选择 1 章");
+    const selected = uniqueIndexes.map((index) => ({
+      index,
+      title: project.chapters[index].title,
+      content: project.chapters[index].content,
+    }));
+    if (selected.every((item) => !item.content.trim())) {
+      throw new Error("所选章节暂无正文，请先写入或选择有内容的章节");
+    }
+    return selected;
+  };
+
+  const executeToolkitTool = async (
+    tool: ToolkitToolId,
+    chapterIndexes: number[],
+    options?: {
+      notes?: string
+      chapterCount?: number
+      restrictCast?: boolean
+      characterIds?: string[]
+      plotIds?: string[]
+    },
+  ) => {
+    const project = dataRef.current.projects.find(
+      (item) => item.id === dataRef.current.activeProjectId,
+    );
+    if (!project) throw new Error("请先打开一部作品");
+    const provider = resolveActiveProvider();
+    const track = (usage: AiUsage) =>
+      recordUsage(project.id, provider, usage, "toolkit", 0);
+    toolkitFillsRef.current = null;
+    toolkitDriftFixesRef.current = [];
+    toolkitBridgeDraftsRef.current = [];
+
+    if (tool === "extract") {
+      if (
+        project.characters.length ||
+        project.worldNotes.length ||
+        project.plotNotes.length
+      ) {
+        const confirmed = window.confirm(
+          "当前作品已有部分设定。继续将用 AI 抽样结果覆盖角色 / 世界观 / 情节 / 时间线记忆，是否继续？",
+        );
+        if (!confirmed) return;
+      }
+      const next = await extractLoreIntoProject(project);
+      updateProject(project.id, () => next);
+      setToolkitResult({
+        title: "设定提炼完成",
+        text: `角色 ${next.characters.length} · 世界观 ${next.worldNotes.length} · 情节 ${next.plotNotes.length} · 记忆 ${next.memories.length}`,
+      });
+      setToast("设定已提炼");
+      return;
+    }
+
+    if (tool === "supplement") {
+      const next = await supplementLoreFromSelectedChapters(
+        project,
+        chapterIndexes,
+      );
+      updateProject(project.id, () => next);
+      setToolkitResult({
+        title: "三章补充设定完成",
+        text: `角色 ${next.characters.length} · 世界观 ${next.worldNotes.length} · 情节 ${next.plotNotes.length} · 记忆 ${next.memories.length}`,
+      });
+      setToast("设定已增量补充");
+      return;
+    }
+
+    if (tool === "backfill") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 8);
+      const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+        selected,
+        {
+          maxChapters: 8,
+          perChapterChars: 5000,
+          maxChars: 28000,
+          label: "【章纲回填抽样】",
+        },
+      );
+      const summaries = await runBackfillSummaries(
+        provider,
+        project,
+        buildBackfillSummariesPrompt(project, sample, sampledChapterIndexes),
+        undefined,
+        track,
+      );
+      updateProject(project.id, (current) =>
+        appendIdeaReport(
+          applyChapterSummaries(current, summaries, { replace: true }),
+          "章纲回填",
+          `已回填 ${summaries.length} 章章纲：\n${summaries
+            .map((item) => `第${item.index}章：${item.summary}`)
+            .join("\n")}`,
+        ),
+      );
+      setToolkitResult({
+        title: "章纲已回填",
+        text: summaries
+          .map((item) => `第${item.index}章：${item.summary}`)
+          .join("\n\n"),
+      });
+      setToast(`已回填 ${summaries.length} 章章纲`);
+      return;
+    }
+
+    if (tool === "audit") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 8);
+      const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+        selected,
+        { maxChapters: 8, perChapterChars: 4500, maxChars: 26000 },
+      );
+      const report = await runConsistencyAudit(
+        provider,
+        buildConsistencyAuditPrompt(project, sample, sampledChapterIndexes),
+        undefined,
+        track,
+      );
+      updateProject(project.id, (current) =>
+        appendIdeaReport(current, "一致性审计", report),
+      );
+      setToolkitResult({ title: "一致性审计", text: report });
+      setToast("审计报告已写入灵感");
+      return;
+    }
+
+    if (tool === "style") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 3);
+      const { sample } = buildSelectedChaptersSample(selected, {
+        maxChapters: 3,
+        perChapterChars: 6000,
+      });
+      const fingerprint = await runStyleFingerprint(
+        provider,
+        buildStyleFingerprintPrompt(project, sample),
+        undefined,
+        track,
+      );
+      updateProject(project.id, (current) =>
+        appendIdeaReport(
+          applyStyleFingerprint(current, fingerprint),
+          "文风指纹",
+          fingerprint,
+        ),
+      );
+      setToolkitResult({ title: "文风指纹已写入记忆", text: fingerprint });
+      setToast("文风指纹已置顶");
+      return;
+    }
+
+    if (tool === "timeline") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 3);
+      const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+        selected,
+        { maxChapters: 3, perChapterChars: 6000 },
+      );
+      const payload = await runCharacterTimelines(
+        provider,
+        buildCharacterTimelinePrompt(project, sample, sampledChapterIndexes),
+        undefined,
+        track,
+      );
+      updateProject(project.id, (current) =>
+        appendIdeaReport(
+          applyTimelineAndArcs(current, payload),
+          "人物时间线补充",
+          `记忆 ${payload.memories.length} · 情节 ${payload.plot.length}`,
+        ),
+      );
+      setToolkitResult({
+        title: "时间线 / 情节弧已补充",
+        text: `新增记忆 ${payload.memories.length} 条，情节 ${payload.plot.length} 条`,
+      });
+      setToast("人物时间线已补充");
+      return;
+    }
+
+    if (tool === "gaps") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 3);
+      const { sample } = buildSelectedChaptersSample(selected, {
+        maxChapters: 3,
+        perChapterChars: 5500,
+      });
+      const { report, fills } = await runSettingGapReport(
+        provider,
+        buildSettingGapPrompt(project, sample),
+        undefined,
+        track,
+      );
+      toolkitFillsRef.current = fills;
+      updateProject(project.id, (current) =>
+        appendIdeaReport(current, "设定缺口报告", report),
+      );
+      setToolkitResult({
+        title: "设定缺口报告",
+        text: `${report}\n\n可补全：角色 ${fills.characters.length} · 世界观 ${fills.world.length} · 情节 ${fills.plot.length} · 记忆 ${fills.memories.length}`,
+        fills,
+      });
+      setToast("缺口报告已写入灵感");
+      return;
+    }
+
+    if (tool === "drift") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 8);
+      const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+        selected,
+        { maxChapters: 8, perChapterChars: 4500, maxChars: 26000 },
+      );
+      const drift = await runOutlineDrift(
+        provider,
+        buildOutlineDriftPrompt(project, sample, sampledChapterIndexes),
+        undefined,
+        track,
+      );
+      toolkitDriftFixesRef.current = drift.fixes;
+      const driftText = [
+        drift.report,
+        drift.drifts.length
+          ? drift.drifts
+              .map(
+                (item) =>
+                  `第${item.index}章 [${item.severity}] ${item.issue}`,
+              )
+              .join("\n")
+          : "未发现明显漂移条目。",
+      ].join("\n\n");
+      updateProject(project.id, (current) =>
+        appendIdeaReport(current, "大纲漂移检测", driftText),
+      );
+      setToolkitResult({
+        title: "大纲漂移检测",
+        text: driftText,
+        driftFixes: drift.fixes,
+      });
+      setToast("漂移报告已写入灵感");
+      return;
+    }
+
+    if (tool === "digest") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 8);
+      const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+        selected,
+        { maxChapters: 8, perChapterChars: 4000, maxChars: 24000 },
+      );
+      const digests = await runChapterDigests(
+        provider,
+        buildChapterDigestPrompt(project, sample, sampledChapterIndexes),
+        undefined,
+        track,
+      );
+      updateProject(project.id, (current) =>
+        applyChapterDigests(current, digests),
+      );
+      setToolkitResult({
+        title: "阅读沉淀完成",
+        text: digests
+          .map((item) => `${item.title || `第${item.index}章`}\n${item.content}`)
+          .join("\n\n"),
+      });
+      setToast(`已沉淀 ${digests.length} 章记忆`);
+      return;
+    }
+
+    if (tool === "continueOutline") {
+      if (!project.chapters.length)
+        throw new Error("作品尚无章节，无法规划续写大纲");
+      const chapterCount = Math.min(
+        12,
+        Math.max(3, Math.floor(options?.chapterCount ?? 5) || 5),
+      );
+      const outline = await runContinueOutline(
+        provider,
+        buildContinueOutlinePrompt(project, chapterCount, options?.notes),
+        chapterCount,
+        undefined,
+        track,
+      );
+      const startIndex = project.chapters.length + 1;
+      let firstNewId: string | null = null;
+      updateProject(project.id, (current) => {
+        const withOutline = appendContinueOutlineChapters(current, outline);
+        firstNewId =
+          withOutline.chapters[current.chapters.length]?.id ?? null;
+        return appendIdeaReport(
+          withOutline,
+          "续写大纲",
+          `已追加 ${outline.length} 章大纲（自第${startIndex}章起）：\n${outline
+            .map(
+              (item, offset) =>
+                `第${startIndex + offset}章《${item.title}》\n${item.summary}`,
+            )
+            .join("\n\n")}`,
+        );
+      });
+      setToolkitResult({
+        title: "续写大纲已追加",
+        text: outline
+          .map(
+            (item, offset) =>
+              `第${startIndex + offset}章《${item.title}》\n${item.summary}`,
+          )
+          .join("\n\n"),
+      });
+      if (firstNewId) setSelectedChapterId(firstNewId);
+      setView("outline");
+      setToast(`已追加 ${outline.length} 章续写大纲`);
+      return;
+    }
+
+    if (tool === "continue") {
+      const anchorIndex =
+        selectedChapterId &&
+        project.chapters.at(-1)?.id === selectedChapterId
+          ? project.chapters.length - 1
+          : project.chapters.length - 1;
+      const previous = project.chapters[anchorIndex];
+      if (!previous?.content.trim())
+        throw new Error("末章暂无正文，无法续写");
+      const targetWords = previous.targetWords || 2500;
+      const loreScope = {
+        restrictCast: Boolean(options?.restrictCast),
+        characterIds: options?.characterIds,
+        plotIds: options?.plotIds,
+      };
+      const promptProject = scopeProjectForContinue(project, loreScope);
+      const nextChapter = {
+        ...createChapter(project.chapters.length + 1),
+        title: `第${project.chapters.length + 1}章`,
+        summary: "续写中…",
+        targetWords,
+        generationStatus: "generating" as const,
+      };
+      updateProject(project.id, (current) => ({
+        ...current,
+        chapters: [...current.chapters, nextChapter],
+      }));
+      setSelectedChapterId(nextChapter.id);
+      setView("outline");
+      let answer = "";
+      try {
+        const usage = await streamChat({
+          provider,
+          project: promptProject,
+          chapterTitle: nextChapter.title,
+          chapterContent: "",
+          chapterContextLimit: 1200,
+          interactionMode: "revision",
+          messages: [
+            {
+              role: "user",
+              content: buildContinueNextChapterPrompt(
+                project,
+                anchorIndex,
+                targetWords,
+                options?.notes,
+                loreScope,
+              ),
+            },
+          ],
+          onChunk: (chunk) => {
+            answer += chunk;
+            updateProject(project.id, (current) => ({
+              ...current,
+              chapters: current.chapters.map((item) =>
+                item.id === nextChapter.id
+                  ? { ...item, content: answer, updatedAt: now() }
+                  : item,
+              ),
+            }));
+          },
+        });
+        recordUsage(
+          project.id,
+          provider,
+          usage,
+          "toolkit",
+          countWords(answer),
+          nextChapter.id,
+        );
+        updateProject(project.id, (current) => ({
+          ...current,
+          chapters: current.chapters.map((item) =>
+            item.id === nextChapter.id
+              ? {
+                  ...item,
+                  content: answer,
+                  summary: item.summary === "续写中…" ? "" : item.summary,
+                  generationStatus: "done",
+                  status: "revising",
+                  updatedAt: now(),
+                }
+              : item,
+          ),
+        }));
+        setToolkitResult({
+          title: "续写完成",
+          text: `已生成《${nextChapter.title}》，约 ${countWords(answer).toLocaleString()} 字`,
+        });
+        setToast(`已续写《${nextChapter.title}》`);
+      } catch (reason) {
+        updateProject(project.id, (current) => ({
+          ...current,
+          chapters: current.chapters.map((item) =>
+            item.id === nextChapter.id
+              ? {
+                  ...item,
+                  generationStatus: "error",
+                  updatedAt: now(),
+                }
+              : item,
+          ),
+        }));
+        throw reason;
+      }
+      return;
+    }
+
+    if (tool === "polish" || tool === "weakRewrite") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 1);
+      const chapterIndex = selected[0].index;
+      const chapter = project.chapters[chapterIndex];
+      const prompt =
+        tool === "polish"
+          ? buildChapterTakeoverPrompt(
+              project,
+              chapter.id,
+              PLOT_SAFE_POLISH_INSTRUCTION,
+            )
+          : buildWeakChapterRewritePrompt(project, chapterIndex);
+      let answer = "";
+      const usage = await streamChat({
+        provider,
+        project,
+        chapterTitle: chapter.title,
+        chapterContent: chapter.content,
+        chapterContextLimit: 1200,
+        interactionMode: "revision",
+        messages: [{ role: "user", content: prompt }],
+        onChunk: (chunk) => {
+          answer += chunk;
+        },
+      });
+      recordUsage(
+        project.id,
+        provider,
+        usage,
+        "toolkit",
+        countWords(answer),
+        chapter.id,
+      );
+      const cleaned = answer
+        .trim()
+        .replace(/^```(?:text|markdown)?\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+      if (!cleaned) throw new Error("模型没有返回可替换正文");
+      setToolkitResult({
+        title: tool === "polish" ? "保剧情润色稿" : "薄弱章重写稿",
+        text: cleaned.slice(0, 1200) + (cleaned.length > 1200 ? "…" : ""),
+        draft: {
+          chapterId: chapter.id,
+          chapterTitle: chapter.title,
+          before: chapter.content,
+          after: cleaned,
+          prompt: tool === "polish" ? "保剧情润色" : "薄弱章重写",
+        },
+      });
+      setToast("已生成改稿，确认后才会替换正文");
+      return;
+    }
+
+    if (tool === "polishBridge") {
+      const selected = pickToolkitChapters(project, chapterIndexes, 1);
+      const chapter = project.chapters[selected[0].index];
+      let answer = "";
+      const usage = await streamChat({
+        provider,
+        project,
+        chapterTitle: chapter.title,
+        chapterContent: "",
+        chapterContextLimit: 800,
+        interactionMode: "bridge",
+        messages: [
+          {
+            role: "user",
+            content: buildBridgePolishPrompt(
+              project,
+              chapter.id,
+              PLOT_SAFE_BRIDGE_INSTRUCTION,
+            ),
+          },
+        ],
+        onChunk: (chunk) => {
+          answer += chunk;
+        },
+      });
+      recordUsage(
+        project.id,
+        provider,
+        usage,
+        "toolkit",
+        countWords(answer),
+        chapter.id,
+      );
+      const targets = getBridgeChapterTargets(project, chapter.id);
+      const drafts = parseBridgePolishResult(answer, targets);
+      if (!drafts.length) throw new Error("未能解析跨章润色结果");
+      toolkitBridgeDraftsRef.current = drafts;
+      setToolkitResult({
+        title: "三章桥接润色稿",
+        text: drafts
+          .map(
+            (item) =>
+              `第${item.index}章《${item.title}》${item.changed ? "（有改动）" : "（未改）"} · ${countWords(item.content).toLocaleString()} 字`,
+          )
+          .join("\n"),
+        draft: {
+          chapterId: chapter.id,
+          chapterTitle: chapter.title,
+          before: chapter.content,
+          after: drafts.find((item) => item.role === "current")?.content ?? "",
+          prompt: "三章桥接润色",
+        },
+      });
+      setToast("已生成跨章润色稿，确认后替换");
+      return;
+    }
+  };
+
+  const applyToolkitFills = () => {
+    const projectId = dataRef.current.activeProjectId;
+    const fills = toolkitFillsRef.current;
+    if (!projectId || !fills) return;
+    updateProject(projectId, (current) => applyGapFills(current, fills));
+    toolkitFillsRef.current = null;
+    setToast("设定补全已合并");
+    setToolkitResult((current) =>
+      current
+        ? { ...current, fills: undefined, text: `${current.text}\n\n（已应用补全）` }
+        : current,
+    );
+  };
+
+  const applyToolkitDriftFixes = () => {
+    const projectId = dataRef.current.activeProjectId;
+    const fixes = toolkitDriftFixesRef.current;
+    if (!projectId || !fixes.length) return;
+    updateProject(projectId, (current) =>
+      applyChapterSummaries(current, fixes, { replace: true }),
+    );
+    toolkitDriftFixesRef.current = [];
+    setToast("章纲已按正文纠正");
+    setToolkitResult((current) =>
+      current
+        ? {
+            ...current,
+            driftFixes: undefined,
+            text: `${current.text}\n\n（已应用章纲纠正）`,
+          }
+        : current,
+    );
+  };
+
+  const confirmToolkitDraft = () => {
+    const projectId = dataRef.current.activeProjectId;
+    const draft = toolkitResult?.draft;
+    if (!projectId || !draft) return;
+    const provider = resolveActiveProvider();
+    const bridgeDrafts = toolkitBridgeDraftsRef.current;
+    if (bridgeDrafts.length) {
+      const project = dataRef.current.projects.find(
+        (item) => item.id === projectId,
+      );
+      if (!project) return;
+      updateProject(projectId, (current) => ({
+        ...current,
+        chapters: current.chapters.map((row) => {
+          const draftRow = bridgeDrafts.find(
+            (item) => item.chapterId === row.id && item.changed,
+          );
+          return draftRow
+            ? { ...row, content: draftRow.content, updatedAt: now() }
+            : row;
+        }),
+      }));
+      for (const item of bridgeDrafts) {
+        if (!item.changed) continue;
+        const chapter = project.chapters.find(
+          (row) => row.id === item.chapterId,
+        );
+        if (!chapter) continue;
+        recordAiOperation(projectId, {
+          chapterId: chapter.id,
+          chapterTitle: chapter.title,
+          action: "replace",
+          prompt: "三章桥接润色",
+          beforeContent: chapter.content,
+          afterContent: item.content,
+          providerId: provider.id,
+          model: provider.model,
+          tokens: 0,
+        });
+      }
+      toolkitBridgeDraftsRef.current = [];
+      setToast("跨章润色已应用");
+    } else {
+      updateProject(projectId, (current) => ({
+        ...current,
+        chapters: current.chapters.map((item) =>
+          item.id === draft.chapterId
+            ? { ...item, content: draft.after, updatedAt: now() }
+            : item,
+        ),
+      }));
+      recordAiOperation(projectId, {
+        chapterId: draft.chapterId,
+        chapterTitle: draft.chapterTitle,
+        action: "replace",
+        prompt: draft.prompt,
+        beforeContent: draft.before,
+        afterContent: draft.after,
+        providerId: provider.id,
+        model: provider.model,
+        tokens: 0,
+      });
+      setToast(`已替换《${draft.chapterTitle}》正文`);
+    }
+    setToolkitResult((current) =>
+      current
+        ? {
+            ...current,
+            draft: undefined,
+            text: `${current.text}\n\n（已确认替换）`,
+          }
+        : current,
+    );
+  };
+
+  const createSequelFromActive = () => {
+    const project = dataRef.current.projects.find(
+      (item) => item.id === dataRef.current.activeProjectId,
+    );
+    if (!project) return;
+    if (
+      !window.confirm(
+        `将基于《${project.title}》创建续作（继承设定、不含正文）。是否继续？`,
+      )
+    )
+      return;
+    const sequel = createSequelProject(project);
+    replaceData((current) => ({
+      ...current,
+      projects: [sequel, ...current.projects],
+      activeProjectId: sequel.id,
+    }));
+    setSelectedChapterId(sequel.chapters[0]?.id ?? null);
+    setView("outline");
+    setToolkitOpen(false);
+    setToast(`已创建续作《${sequel.title}》`);
+  };
+
+  const runSeasoningDrafts = async (
+    project: NovelProject,
+    chapterIndexes: number[],
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (message: string) => void;
+    },
+  ) => {
+    const { signal, onProgress } = options ?? {};
+    const provider = resolveActiveProvider();
+    const uniqueIndexes = [...new Set(chapterIndexes)]
+      .filter(
+        (index) =>
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < project.chapters.length,
+      )
+      .slice(0, 3);
+    if (!uniqueIndexes.length) throw new Error("请至少选择 1 章");
+    const hasSeasoning =
+      (project.seasoningScenes?.length ?? 0) +
+        (project.seasoningSignals?.length ?? 0) +
+        (project.seasoningRules?.length ?? 0) >
+      0;
+    if (!hasSeasoning)
+      throw new Error("请先在加料页填写场景说明、识别点或加料规范");
+    const instruction = buildSeasoningEnrichInstruction(project);
+    const drafts: SeasoningDraft[] = [];
+    for (const chapterIndex of uniqueIndexes) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      const latest =
+        dataRef.current.projects.find((item) => item.id === project.id) ??
+        project;
+      const chapter = latest.chapters[chapterIndex];
+      if (!chapter) continue;
+      if (!chapter.content.trim()) {
+        onProgress?.(
+          `跳过第${chapterIndex + 1}章《${chapter.title}》（无正文）`,
+        );
+        continue;
+      }
+      onProgress?.(
+        `正在生成加料稿 ${drafts.length + 1}/${uniqueIndexes.length}：第${chapterIndex + 1}章《${chapter.title}》`,
+      );
+      let answer = "";
+      const usage = await streamChat({
+        provider,
+        project: latest,
+        chapterTitle: chapter.title,
+        chapterContent: chapter.content,
+        chapterContextLimit: 1200,
+        interactionMode: "revision",
+        signal,
+        messages: [
+          {
+            role: "user",
+            content: buildChapterTakeoverPrompt(
+              latest,
+              chapter.id,
+              instruction,
+            ),
+          },
+        ],
+        onChunk: (chunk) => {
+          answer += chunk;
+        },
+      });
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      const cleaned = answer
+        .trim()
+        .replace(/^```(?:text|markdown)?\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+      if (!cleaned) throw new Error(`第${chapterIndex + 1}章加料未返回正文`);
+      recordUsage(
+        project.id,
+        provider,
+        usage,
+        "toolkit",
+        countWords(cleaned),
+        chapter.id,
+      );
+      const check = assessSeasoningDraft(chapter.content, cleaned);
+      drafts.push({
+        chapterId: chapter.id,
+        chapterIndex,
+        chapterTitle: chapter.title,
+        before: chapter.content,
+        after: cleaned,
+        tokens: usage.totalTokens,
+        warning: check.warning,
+      });
+    }
+    if (!drafts.length) throw new Error("所选章节均无正文，无法加料");
+    onProgress?.(`已生成 ${drafts.length} 章加料稿，请确认后写入`);
+    return drafts;
+  };
+
+  const applySeasoningDrafts = async (
+    project: NovelProject,
+    drafts: SeasoningDraft[],
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (message: string) => void;
+    },
+  ) => {
+    const { signal, onProgress } = options ?? {};
+    const provider = resolveActiveProvider();
+    for (const draft of drafts) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      recordAiOperation(project.id, {
+        chapterId: draft.chapterId,
+        chapterTitle: draft.chapterTitle,
+        action: "replace",
+        prompt: "三章加料",
+        beforeContent: draft.before,
+        afterContent: draft.after,
+        providerId: provider.id,
+        model: provider.model,
+        tokens: draft.tokens,
+      });
+      updateProject(project.id, (current) => ({
+        ...current,
+        chapters: current.chapters.map((item) =>
+          item.id === draft.chapterId
+            ? { ...item, content: draft.after, updatedAt: now() }
+            : item,
+        ),
+      }));
+    }
+
+    onProgress?.("正在记录角色与时间线…");
+    const latestAfter =
+      dataRef.current.projects.find((item) => item.id === project.id) ??
+      project;
+    const indexes = drafts.map((item) => item.chapterIndex);
+    const selectedForCapture = indexes
+      .map((index) => {
+        const chapter = latestAfter.chapters[index];
+        if (!chapter?.content.trim()) return null;
+        return {
+          index,
+          title: chapter.title,
+          content: chapter.content,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    let capturedCharacters = 0;
+    let capturedMemories = 0;
+    let captureError = "";
+    if (selectedForCapture.length) {
+      try {
+        const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+          selectedForCapture,
+          {
+            maxChapters: 3,
+            perChapterChars: 6500,
+            maxChars: 20000,
+            label: "【加料后正文 · 用于记录角色与时间线】",
+          },
+        );
+        const captured = await runPostSeasoningCapture(
+          provider,
+          buildPostSeasoningCapturePrompt(
+            latestAfter,
+            sample,
+            sampledChapterIndexes,
+          ),
+          signal,
+          (usage) => recordUsage(project.id, provider, usage, "toolkit", 0),
+        );
+        capturedCharacters = captured.characters.length;
+        capturedMemories = captured.memories.length;
+        if (capturedCharacters || capturedMemories) {
+          updateProject(project.id, (current) =>
+            supplementProjectLore(
+              current,
+              {
+                characters: captured.characters,
+                world: [],
+                plot: [],
+                memories: captured.memories,
+              },
+              {
+                chapterIndexes: sampledChapterIndexes,
+                skipIdeaNote: true,
+              },
+            ),
+          );
+        }
+      } catch (reason) {
+        if (reason instanceof DOMException && reason.name === "AbortError")
+          throw reason;
+        captureError =
+          reason instanceof Error ? reason.message : "角色与时间线记录失败";
+      }
+    }
+
+    updateProject(project.id, (current) =>
+      appendIdeaReport(
+        current,
+        "三章加料",
+        `已确认写入 ${drafts.length} 章加料稿。自动记录角色 ${capturedCharacters}、时间线/关系记忆 ${capturedMemories}${captureError ? `。设定记录失败：${captureError}` : ""}。正文可在 AI 操作历史中回退。`,
+      ),
+    );
+    return {
+      draftCount: drafts.length,
+      capturedCharacters,
+      capturedMemories,
+      captureError,
+    };
+  };
 
   const pauseGeneration = (projectId: string) => {
-    generationAbortRef.current?.abort()
+    generationAbortRef.current?.abort();
     updateProject(projectId, (project) => ({
       ...project,
-      generation: project.generation ? { ...project.generation, status: 'paused', error: undefined } : undefined,
-    }))
-  }
+      generation: project.generation
+        ? { ...project.generation, status: "paused", error: undefined }
+        : undefined,
+    }));
+  };
 
   const resumeGeneration = (projectId: string) => {
     updateProject(projectId, (project) => ({
       ...project,
-      generation: project.generation ? { ...project.generation, status: 'generating', error: undefined } : undefined,
-      chapters: project.chapters.map((chapter) => chapter.generationStatus === 'error'
-        ? { ...chapter, generationStatus: 'pending' }
-        : chapter),
-    }))
-  }
+      generation: project.generation
+        ? { ...project.generation, status: "generating", error: undefined }
+        : undefined,
+      chapters: project.chapters.map((chapter) =>
+        chapter.generationStatus === "error"
+          ? { ...chapter, generationStatus: "pending" }
+          : chapter,
+      ),
+    }));
+  };
 
   const selectView = (next: ViewId) => {
-    setView(next)
-    if (next !== 'outline') setAiOpen(false)
-    setMobileNavOpen(false)
-  }
+    setView(next);
+    if (next !== "outline") setAiOpen(false);
+    setMobileNavOpen(false);
+  };
 
   if (!ready) {
     return (
       <div className="loading-screen">
-        <span className="brand-mark"><BookOpenText size={24} /></span>
+        <span className="brand-mark">
+          <BookOpenText size={24} />
+        </span>
         <LoaderCircle className="spin" size={22} />
       </div>
-    )
+    );
   }
 
   return (
@@ -572,71 +1917,123 @@ function App() {
         onOpenHome={openHome}
         onAiCreate={() => setAiCreateOpen(true)}
         onCloseMobile={() => setMobileNavOpen(false)}
-        onToggleTheme={() => setData((current) => {
-          const resolvedDark = current.settings.theme === 'dark'
-            || (current.settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
-          return {
-            ...current,
-            settings: {
-              ...current.settings,
-              theme: resolvedDark ? 'light' : 'dark',
-            },
-          }
-        })}
+        onToggleTheme={() =>
+          setData((current) => {
+            const resolvedDark =
+              current.settings.theme === "dark" ||
+              (current.settings.theme === "system" &&
+                window.matchMedia("(prefers-color-scheme: dark)").matches);
+            return {
+              ...current,
+              settings: {
+                ...current.settings,
+                theme: resolvedDark ? "light" : "dark",
+              },
+            };
+          })
+        }
       />
 
       <main className="main-area">
         <header className="topbar">
-          <button className="icon-button mobile-menu" onClick={() => setMobileNavOpen(true)} aria-label="打开导航">
+          <button
+            className="icon-button mobile-menu"
+            onClick={() => setMobileNavOpen(true)}
+            aria-label="打开导航"
+          >
             <Menu size={21} />
           </button>
           <div className="topbar-title">
             <span>{viewMeta[view].label}</span>
-            {activeProject && view !== 'home' ? <span className="project-breadcrumb">/ {activeProject.title}</span> : null}
+            {activeProject && view !== "home" ? (
+              <span className="project-breadcrumb">
+                / {activeProject.title}
+              </span>
+            ) : null}
           </div>
           <div className="topbar-actions">
             <button
-              className={`icon-button ${aiOpen ? 'active' : ''}`}
-              onClick={() => activeProject && view === 'outline' && setAiOpen((open) => !open)}
-              disabled={!activeProject || view !== 'outline'}
-              aria-label={aiOpen ? '关闭章节 AI 助手' : '打开章节 AI 助手'}
-              title={aiOpen ? '关闭章节 AI 助手' : '打开章节 AI 助手'}
+              className={`icon-button ${aiOpen ? "active" : ""}`}
+              onClick={() =>
+                activeProject &&
+                view === "outline" &&
+                setAiOpen((open) => !open)
+              }
+              disabled={!activeProject || view !== "outline"}
+              aria-label={aiOpen ? "关闭章节 AI 助手" : "打开章节 AI 助手"}
+              title={aiOpen ? "关闭章节 AI 助手" : "打开章节 AI 助手"}
               aria-haspopup="dialog"
               aria-expanded={aiOpen}
               aria-controls="chapter-ai-panel"
-            ><Feather size={19} /></button>
-            <button className="icon-button" aria-label="通知" title="通知"><Bell size={19} /></button>
-            <button className="ink-avatar" aria-label="个人中心" title="个人中心">墨</button>
+            >
+              <Feather size={19} />
+            </button>
+            <button className="icon-button" aria-label="通知" title="通知">
+              <Bell size={19} />
+            </button>
+            <button
+              className="ink-avatar"
+              aria-label="个人中心"
+              title="个人中心"
+            >
+              墨
+            </button>
           </div>
         </header>
 
         <div className="content-area">
-          {view !== 'home' && view !== 'settings' && !activeProject ? (
-            <EmptyWorkspace onAiCreate={() => setAiCreateOpen(true)} onManualCreate={() => setNewProjectOpen(true)} />
+          {view !== "home" && view !== "settings" && !activeProject ? (
+            <EmptyWorkspace
+              onAiCreate={() => setAiCreateOpen(true)}
+              onManualCreate={() => setNewProjectOpen(true)}
+              onImportTxt={() => setImportTxtOpen(true)}
+            />
           ) : null}
-          {view === 'home' ? (
+          {view === "home" ? (
             <HomeDashboard
               data={data}
               onOpenProject={switchProject}
               onCreate={() => setAiCreateOpen(true)}
+              onImportTxt={() => setImportTxtOpen(true)}
               onDeleteProject={(project) => {
                 if (window.confirm(`确定删除《${project.title}》吗？`)) {
-                  const trash: TrashItem = { id: uid(), kind: 'project', title: project.title, deletedAt: now(), payload: project }
+                  const trash: TrashItem = {
+                    id: uid(),
+                    kind: "project",
+                    title: project.title,
+                    deletedAt: now(),
+                    payload: project,
+                  };
                   replaceData((current) => ({
                     ...current,
-                    projects: current.projects.filter((item) => item.id !== project.id),
-                    activeProjectId: current.activeProjectId === project.id ? current.projects.find((item) => item.id !== project.id)?.id ?? null : current.activeProjectId,
-                  }))
-                  try { localStorage.setItem('mogu-last-deleted-project', JSON.stringify(trash)) } catch { /* best effort */ }
-                  setToast('小说已删除，可在设置中恢复最近删除')
+                    projects: current.projects.filter(
+                      (item) => item.id !== project.id,
+                    ),
+                    activeProjectId:
+                      current.activeProjectId === project.id
+                        ? (current.projects.find(
+                            (item) => item.id !== project.id,
+                          )?.id ?? null)
+                        : current.activeProjectId,
+                  }));
+                  try {
+                    localStorage.setItem(
+                      "mogu-last-deleted-project",
+                      JSON.stringify(trash),
+                    );
+                  } catch {
+                    /* 尽力而为 */
+                  }
+                  setToast("小说已删除，可在设置中恢复最近删除");
                 }
               }}
             />
           ) : null}
-          {view === 'outline' && activeProject ? (
+          {view === "outline" && activeProject ? (
             <OutlineEditor
               project={activeProject}
               providers={data.settings.providers}
+              activeProviderId={data.settings.activeProviderId}
               selectedChapterId={selectedChapterId}
               onSelectChapter={setSelectedChapterId}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
@@ -645,88 +2042,140 @@ function App() {
               onToast={setToast}
               onPause={() => pauseGeneration(activeProject.id)}
               onResume={() => resumeGeneration(activeProject.id)}
+              onOpenToolkit={() => {
+                setToolkitResult(null);
+                setToolkitOpen(true);
+              }}
             />
           ) : null}
-          {view === 'characters' && activeProject ? (
+          {view === "characters" && activeProject ? (
             <CharactersView
               project={activeProject}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
+              onToast={setToast}
+              onOpenToolkit={() => {
+                setToolkitResult(null);
+                setToolkitOpen(true);
+              }}
             />
           ) : null}
-          {(view === 'world' || view === 'plot' || view === 'ideas') && activeProject ? (
+          {(view === "world" || view === "plot" || view === "ideas") &&
+          activeProject ? (
             <NotesView
               kind={view}
               project={activeProject}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
             />
           ) : null}
-          {view === 'memory' && activeProject ? (
+          {view === "memory" && activeProject ? (
             <MemoryView
               project={activeProject}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
             />
           ) : null}
-          {view === 'trash' && activeProject ? (
+          {view === "seasoning" && activeProject ? (
+            <SeasoningView
+              project={activeProject}
+              selectedChapterId={selectedChapterId}
+              providers={data.settings.providers}
+              activeProviderId={data.settings.activeProviderId}
+              onUpdate={(updater) => updateProject(activeProject.id, updater)}
+              onToast={setToast}
+              onOpenOutline={() => setView("outline")}
+              onExtractLore={async () => {
+                const next = await extractLoreIntoProject(activeProject);
+                updateProject(activeProject.id, () => next);
+                setToast(
+                  `设定已提炼：${next.characters.length} 角色 · ${next.worldNotes.length} 世界观 · ${next.plotNotes.length} 情节`,
+                );
+              }}
+              onDraftSeasoning={async (chapterIndexes, signal, onProgress) =>
+                runSeasoningDrafts(activeProject, chapterIndexes, {
+                  signal,
+                  onProgress,
+                })
+              }
+              onApplySeasoning={async (drafts, signal, onProgress) =>
+                applySeasoningDrafts(activeProject, drafts, {
+                  signal,
+                  onProgress,
+                })
+              }
+            />
+          ) : null}
+          {view === "trash" && activeProject ? (
             <TrashView
               project={activeProject}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
             />
           ) : null}
-          {view === 'settings' ? (
+          {view === "settings" ? (
             <SettingsView
               data={data}
               activeProject={activeProject}
               onToast={setToast}
-              onChange={(value) => replaceData(typeof value === 'function' ? value : () => value)}
+              onChange={(value) =>
+                replaceData(typeof value === "function" ? value : () => value)
+              }
               onImport={async (event) => {
-                const file = event.target.files?.[0]
-                if (!file) return
+                const file = event.target.files?.[0];
+                if (!file) return;
                 try {
-                  const imported = await parseImport(file)
-                  dataRef.current = imported
-                  setData(imported)
-                  setToast('备份已导入')
+                  const imported = await parseImport(file, dataRef.current);
+                  dataRef.current = imported;
+                  setData(imported);
+                  setToast("备份已导入（API Key 未从文件恢复）");
                 } catch (error) {
-                  setToast(error instanceof Error ? error.message : '导入失败')
+                  setToast(error instanceof Error ? error.message : "导入失败");
                 }
-                event.target.value = ''
+                event.target.value = "";
               }}
               onDeleteProject={(project) => {
                 const trash: TrashItem = {
                   id: uid(),
-                  kind: 'project',
+                  kind: "project",
                   title: project.title,
                   deletedAt: now(),
                   payload: project,
-                }
+                };
                 setData((current) => {
-                  const projects = current.projects.filter((item) => item.id !== project.id)
-                  const replacement = projects[0]?.id ?? null
-                  return { ...current, projects, activeProjectId: replacement }
-                })
+                  const projects = current.projects.filter(
+                    (item) => item.id !== project.id,
+                  );
+                  const replacement = projects[0]?.id ?? null;
+                  return { ...current, projects, activeProjectId: replacement };
+                });
                 try {
-                  localStorage.setItem('mogu-last-deleted-project', JSON.stringify(trash))
+                  localStorage.setItem(
+                    "mogu-last-deleted-project",
+                    JSON.stringify(trash),
+                  );
                 } catch {
-                  // Deletion still succeeds when the browser blocks localStorage.
+                  // 即便浏览器拦截 localStorage，删除操作仍视为成功。
                 }
-                setView('outline')
-                setToast('小说已移除，可通过最近删除恢复')
+                setView("outline");
+                setToast("小说已移除，可通过最近删除恢复");
               }}
               onRestoreProject={() => {
                 try {
-                  const raw = localStorage.getItem('mogu-last-deleted-project')
-                  if (!raw) return setToast('没有可恢复的小说')
-                  const trash = JSON.parse(raw) as TrashItem
-                  const project = trash.payload as NovelProject
+                  const raw = localStorage.getItem("mogu-last-deleted-project");
+                  if (!raw) return setToast("没有可恢复的小说");
+                  const trash = JSON.parse(raw) as TrashItem;
+                  const project = trash.payload as NovelProject;
                   setData((current) => ({
                     ...current,
-                    projects: [project, ...current.projects.filter((item) => item.id !== project.id)],
+                    projects: [
+                      project,
+                      ...current.projects.filter(
+                        (item) => item.id !== project.id,
+                      ),
+                    ],
                     activeProjectId: project.id,
-                  }))
-                  localStorage.removeItem('mogu-last-deleted-project')
-                  setToast('小说已恢复')
+                  }));
+                  localStorage.removeItem("mogu-last-deleted-project");
+                  setToast("小说已恢复");
                 } catch {
-                  setToast('恢复失败')
+                  setToast("恢复失败");
                 }
               }}
             />
@@ -736,168 +2185,374 @@ function App() {
 
       {aiOpen && activeProject ? (
         <AiPanel
-          key={`${activeProject.id}:${selectedChapterId ?? 'none'}`}
+          key={`${activeProject.id}:${selectedChapterId ?? "none"}`}
           data={data}
           project={activeProject}
-          chapter={activeProject.chapters.find((chapter) => chapter.id === selectedChapterId) ?? null}
+          chapter={
+            activeProject.chapters.find(
+              (chapter) => chapter.id === selectedChapterId,
+            ) ?? null
+          }
           onClose={() => setAiOpen(false)}
           onInsert={(chapterId, text) => {
             updateProject(activeProject.id, (project) => ({
               ...project,
-              chapters: project.chapters.map((chapter) => chapter.id === chapterId
-                ? { ...chapter, content: `${chapter.content}${chapter.content ? '\n\n' : ''}${text.trim()}`, updatedAt: now() }
-                : chapter),
-            }))
-            setToast('已插入章节末尾')
+              chapters: project.chapters.map((chapter) =>
+                chapter.id === chapterId
+                  ? {
+                      ...chapter,
+                      content: `${chapter.content}${chapter.content ? "\n\n" : ""}${text.trim()}`,
+                      updatedAt: now(),
+                    }
+                  : chapter,
+              ),
+            }));
+            setToast("已插入章节末尾");
           }}
           onReplace={(chapterId, text) => {
-            const timestamp = now()
+            const timestamp = now();
             updateProject(activeProject.id, (project) => ({
               ...project,
-              chapters: project.chapters.map((chapter) => chapter.id === chapterId ? {
-                ...chapter,
-                content: text.trim(),
-                status: 'revising',
-                workflowStage: undefined,
-                qualityScore: undefined,
-                qualityNotes: undefined,
-                aiRevisionBackup: chapter.aiRevisionBackup ?? {
-                  content: chapter.content,
-                  status: chapter.status,
-                  qualityScore: chapter.qualityScore,
-                  qualityNotes: chapter.qualityNotes,
-                  createdAt: timestamp,
-                },
-                updatedAt: timestamp,
-              } : chapter),
-            }))
-            setToast('AI 修改已应用，可随时恢复原文')
+              chapters: project.chapters.map((chapter) =>
+                chapter.id === chapterId
+                  ? {
+                      ...chapter,
+                      content: text.trim(),
+                      status: "revising",
+                      workflowStage: undefined,
+                      qualityScore: undefined,
+                      qualityNotes: undefined,
+                      aiRevisionBackup: chapter.aiRevisionBackup ?? {
+                        content: chapter.content,
+                        status: chapter.status,
+                        qualityScore: chapter.qualityScore,
+                        qualityNotes: chapter.qualityNotes,
+                        createdAt: timestamp,
+                      },
+                      updatedAt: timestamp,
+                    }
+                  : chapter,
+              ),
+            }));
+            setToast("AI 修改已应用，可随时恢复原文");
+          }}
+          onReplaceMany={(updates) => {
+            if (!updates.length) return;
+            const timestamp = now();
+            const updateMap = new Map(
+              updates.map((item) => [item.chapterId, item.text.trim()]),
+            );
+            updateProject(activeProject.id, (project) => ({
+              ...project,
+              chapters: project.chapters.map((chapter) => {
+                const nextContent = updateMap.get(chapter.id);
+                if (nextContent === undefined) return chapter;
+                return {
+                  ...chapter,
+                  content: nextContent,
+                  status: "revising" as const,
+                  workflowStage: undefined,
+                  qualityScore: undefined,
+                  qualityNotes: undefined,
+                  aiRevisionBackup: chapter.aiRevisionBackup ?? {
+                    content: chapter.content,
+                    status: chapter.status,
+                    qualityScore: chapter.qualityScore,
+                    qualityNotes: chapter.qualityNotes,
+                    createdAt: timestamp,
+                  },
+                  updatedAt: timestamp,
+                };
+              }),
+            }));
+            setToast(`跨章润色已写入 ${updates.length} 章，可分别恢复原文`);
           }}
           onRestore={(chapterId) => {
-            const timestamp = now()
-            const currentChapter = activeProject.chapters.find((item) => item.id === chapterId)
-            const backupContent = currentChapter?.aiRevisionBackup?.content
+            const timestamp = now();
+            const currentChapter = activeProject.chapters.find(
+              (item) => item.id === chapterId,
+            );
+            const backupContent = currentChapter?.aiRevisionBackup?.content;
             updateProject(activeProject.id, (project) => ({
               ...project,
-              chapters: project.chapters.map((chapter) => chapter.id === chapterId && chapter.aiRevisionBackup ? {
-                ...chapter,
-                content: chapter.aiRevisionBackup.content,
-                status: chapter.aiRevisionBackup.status,
-                qualityScore: chapter.aiRevisionBackup.qualityScore,
-                qualityNotes: chapter.aiRevisionBackup.qualityNotes,
-                workflowStage: undefined,
-                aiRevisionBackup: undefined,
-                updatedAt: timestamp,
-              } : chapter),
-            }))
-            if (currentChapter?.aiRevisionBackup) recordAiOperation(activeProject.id, {
-              chapterId,
-              chapterTitle: currentChapter.title,
-              action: 'restore',
-              prompt: '恢复 AI 修改前的正文',
-              beforeContent: currentChapter.content,
-              afterContent: backupContent ?? currentChapter.content,
-              providerId: data.settings.activeProviderId,
-              model: data.settings.providers.find((item) => item.id === data.settings.activeProviderId)?.model ?? '',
-              tokens: 0,
-            })
-            setToast('已恢复 AI 修改前的正文')
+              chapters: project.chapters.map((chapter) =>
+                chapter.id === chapterId && chapter.aiRevisionBackup
+                  ? {
+                      ...chapter,
+                      content: chapter.aiRevisionBackup.content,
+                      status: chapter.aiRevisionBackup.status,
+                      qualityScore: chapter.aiRevisionBackup.qualityScore,
+                      qualityNotes: chapter.aiRevisionBackup.qualityNotes,
+                      workflowStage: undefined,
+                      aiRevisionBackup: undefined,
+                      updatedAt: timestamp,
+                    }
+                  : chapter,
+              ),
+            }));
+            if (currentChapter?.aiRevisionBackup)
+              recordAiOperation(activeProject.id, {
+                chapterId,
+                chapterTitle: currentChapter.title,
+                action: "restore",
+                prompt: "恢复 AI 修改前的正文",
+                beforeContent: currentChapter.content,
+                afterContent: backupContent ?? currentChapter.content,
+                providerId: data.settings.activeProviderId,
+                model:
+                  data.settings.providers.find(
+                    (item) => item.id === data.settings.activeProviderId,
+                  )?.model ?? "",
+                tokens: 0,
+              });
+            setToast("已恢复 AI 修改前的正文");
           }}
-          onPersistMemory={(chapterId, messages) => persistAiMemory(activeProject.id, chapterId, messages)}
-          onRecordUsage={(usage, source, words, chapterId, usageProvider) => recordUsage(activeProject.id, usageProvider, usage, source, words, chapterId)}
-          onRecordOperation={(operation) => recordAiOperation(activeProject.id, operation)}
-          onUndoOperation={(operationId) => undoAiOperation(activeProject.id, operationId)}
+          onPersistMemory={(chapterId, messages) =>
+            persistAiMemory(activeProject.id, chapterId, messages)
+          }
+          onRecordUsage={(usage, source, words, chapterId, usageProvider) =>
+            recordUsage(
+              activeProject.id,
+              usageProvider,
+              usage,
+              source,
+              words,
+              chapterId,
+            )
+          }
+          onRecordOperation={(operation) =>
+            recordAiOperation(activeProject.id, operation)
+          }
+          onUndoOperation={(operationId) =>
+            undoAiOperation(activeProject.id, operationId)
+          }
         />
       ) : null}
 
       {newProjectOpen ? (
-        <NewProjectDialog onClose={() => setNewProjectOpen(false)} onCreate={createNovel} />
+        <NewProjectDialog
+          onClose={() => setNewProjectOpen(false)}
+          onCreate={createNovel}
+        />
+      ) : null}
+      {importTxtOpen ? (
+        <ImportTxtDialog
+          data={data}
+          onClose={() => setImportTxtOpen(false)}
+          onCreate={createNovelFromTxt}
+          onToast={setToast}
+          onOpenSettings={() => {
+            setImportTxtOpen(false);
+            setView("settings");
+          }}
+          onExtractLore={async (project, signal) =>
+            extractLoreIntoProject(project, { signal })
+          }
+        />
+      ) : null}
+      {toolkitOpen && activeProject ? (
+        <ImportedBookToolkitDialog
+          project={activeProject}
+          selectedChapterId={selectedChapterId}
+          busy={toolkitBusy}
+          result={toolkitResult}
+          onClose={() => {
+            if (toolkitBusy) return;
+            setToolkitOpen(false);
+          }}
+          onExecute={async (tool, chapterIndexes, options) => {
+            setToolkitBusy(true);
+            setToolkitResult(null);
+            try {
+              await executeToolkitTool(tool, chapterIndexes, options);
+            } catch (reason) {
+              setToast(
+                reason instanceof Error ? reason.message : "工具执行失败",
+              );
+            } finally {
+              setToolkitBusy(false);
+            }
+          }}
+          onApplyFills={applyToolkitFills}
+          onApplyDriftFixes={applyToolkitDriftFixes}
+          onConfirmDraft={confirmToolkitDraft}
+          onCreateSequel={createSequelFromActive}
+        />
       ) : null}
       {aiCreateOpen ? (
         <AiCreateDialog
           data={data}
           onClose={() => setAiCreateOpen(false)}
           onCreate={createNovelFromAi}
-          onUsage={(usage, provider) => recordUsage(null, provider, usage, 'plan', 0)}
-          onOpenSettings={() => { setAiCreateOpen(false); setView('settings') }}
-          onManual={() => { setAiCreateOpen(false); setNewProjectOpen(true) }}
+          onUsage={(usage, provider) =>
+            recordUsage(null, provider, usage, "plan", 0)
+          }
+          onOpenSettings={() => {
+            setAiCreateOpen(false);
+            setView("settings");
+          }}
+          onManual={() => {
+            setAiCreateOpen(false);
+            setNewProjectOpen(true);
+          }}
+          onImportTxt={() => {
+            setAiCreateOpen(false);
+            setImportTxtOpen(true);
+          }}
         />
       ) : null}
-      {toast ? <div className="toast"><Check size={16} />{toast}</div> : null}
+      {toast ? (
+        <div className="toast">
+          <Check size={16} />
+          {toast}
+        </div>
+      ) : null}
     </div>
-  )
+  );
 }
 
 interface SidebarProps {
-  activeView: ViewId
-  activeProject: NovelProject | null
-  mobileOpen: boolean
-  theme: string
-  onSelectView: (view: ViewId) => void
-  onOpenHome: () => void
-  onAiCreate: () => void
-  onCloseMobile: () => void
-  onToggleTheme: () => void
+  activeView: ViewId;
+  activeProject: NovelProject | null;
+  mobileOpen: boolean;
+  theme: string;
+  onSelectView: (view: ViewId) => void;
+  onOpenHome: () => void;
+  onAiCreate: () => void;
+  onCloseMobile: () => void;
+  onToggleTheme: () => void;
 }
 
 function Sidebar(props: SidebarProps) {
-  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches)
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
   useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const syncSystemTheme = () => setSystemDark(media.matches)
-    syncSystemTheme()
-    media.addEventListener('change', syncSystemTheme)
-    return () => media.removeEventListener('change', syncSystemTheme)
-  }, [])
-  const navigationViews: ViewId[] = ['outline', 'characters', 'world', 'plot', 'memory', 'ideas', 'trash']
-  const resolvedDark = props.theme === 'dark' || (props.theme === 'system' && systemDark)
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncSystemTheme = () => setSystemDark(media.matches);
+    syncSystemTheme();
+    media.addEventListener("change", syncSystemTheme);
+    return () => media.removeEventListener("change", syncSystemTheme);
+  }, []);
+  const navigationViews: ViewId[] = [
+    "outline",
+    "characters",
+    "world",
+    "plot",
+    "memory",
+    "seasoning",
+    "ideas",
+    "trash",
+  ];
+  const resolvedDark =
+    props.theme === "dark" || (props.theme === "system" && systemDark);
   return (
     <>
-      {props.mobileOpen ? <button className="nav-scrim" onClick={props.onCloseMobile} aria-label="关闭导航" /> : null}
-      <aside className={`sidebar ${props.mobileOpen ? 'mobile-open' : ''}`}>
+      {props.mobileOpen ? (
+        <button
+          className="nav-scrim"
+          onClick={props.onCloseMobile}
+          aria-label="关闭导航"
+        />
+      ) : null}
+      <aside className={`sidebar ${props.mobileOpen ? "mobile-open" : ""}`}>
         <div className="sidebar-brand">
-          <img className="brand-art" src="/mogou-logo-transparent-enhanced.png" alt="墨构 MOGOU STUDIO" />
-          <button className="icon-button close-mobile" onClick={props.onCloseMobile} aria-label="关闭导航"><X size={19} /></button>
+          <img
+            className="brand-art"
+            src="/mogou-logo-transparent-enhanced.png"
+            alt="墨构 MOGOU STUDIO"
+          />
+          <button
+            className="icon-button close-mobile"
+            onClick={props.onCloseMobile}
+            aria-label="关闭导航"
+          >
+            <X size={19} />
+          </button>
         </div>
 
-        <button className="new-project-button" onClick={props.onAiCreate} aria-label="AI 一键创作">
+        <button
+          className="new-project-button"
+          onClick={props.onAiCreate}
+          aria-label="AI 一键创作"
+        >
           <Sparkles size={19} />
           <span>AI 智创作</span>
         </button>
 
-        <button className={`nav-button home-button ${props.activeView === 'home' ? 'active' : ''}`} onClick={props.onOpenHome}>
-          <Home size={19} /><span>首页</span>
+        <button
+          className={`nav-button home-button ${props.activeView === "home" ? "active" : ""}`}
+          onClick={props.onOpenHome}
+        >
+          <Home size={19} />
+          <span>首页</span>
         </button>
 
         <nav className="main-nav" aria-label="主导航">
           <div className="sidebar-landscape" aria-hidden="true" />
-          {navigationViews.map((item) => <NavButton key={item} view={item} active={props.activeView === item} onClick={props.onSelectView} />)}
+          {navigationViews.map((item) => (
+            <NavButton
+              key={item}
+              view={item}
+              active={props.activeView === item}
+              onClick={props.onSelectView}
+            />
+          ))}
         </nav>
 
         <div className="sidebar-footer">
-          <button className={`nav-button ${props.activeView === 'settings' ? 'active' : ''}`} onClick={() => props.onSelectView('settings')}>
-            <Settings size={19} /><span>设置</span>
+          <button
+            className={`nav-button ${props.activeView === "settings" ? "active" : ""}`}
+            onClick={() => props.onSelectView("settings")}
+          >
+            <Settings size={19} />
+            <span>设置</span>
           </button>
-          <button className="icon-button" onClick={props.onToggleTheme} aria-label="切换主题" title="切换主题">
+          <button
+            className="icon-button"
+            onClick={props.onToggleTheme}
+            aria-label="切换主题"
+            title="切换主题"
+          >
             {resolvedDark ? <Sun size={19} /> : <Moon size={19} />}
           </button>
         </div>
       </aside>
     </>
-  )
+  );
 }
 
-function NavButton({ view, active, onClick }: { view: ViewId; active: boolean; onClick: (view: ViewId) => void }) {
-  const meta = viewMeta[view]
-  const Icon = meta.icon
+function NavButton({
+  view,
+  active,
+  onClick,
+}: {
+  view: ViewId;
+  active: boolean;
+  onClick: (view: ViewId) => void;
+}) {
+  const meta = viewMeta[view];
+  const Icon = meta.icon;
   return (
-    <button className={`nav-button ${active ? 'active' : ''}`} onClick={() => onClick(view)}>
-      <Icon size={19} /><span>{meta.label}</span>
+    <button
+      className={`nav-button ${active ? "active" : ""}`}
+      onClick={() => onClick(view)}
+    >
+      <Icon size={19} />
+      <span>{meta.label}</span>
     </button>
-  )
+  );
 }
 
-function EmptyWorkspace({ onAiCreate, onManualCreate }: { onAiCreate: () => void; onManualCreate: () => void }) {
+function EmptyWorkspace({
+  onAiCreate,
+  onManualCreate,
+  onImportTxt,
+}: {
+  onAiCreate: () => void;
+  onManualCreate: () => void;
+  onImportTxt: () => void;
+}) {
   return (
     <div className="empty-workspace premium-landing">
       <div className="landing-noise" aria-hidden="true" />
@@ -906,304 +2561,899 @@ function EmptyWorkspace({ onAiCreate, onManualCreate }: { onAiCreate: () => void
       <div className="landing-shell">
         <section className="landing-hero">
           <div className="landing-hero-copy">
-            <div className="landing-eyebrow"><span className="eyebrow-pulse" />MOGOU CREATIVE OS <span className="eyebrow-divider" />为长期创作而生</div>
+            <div className="landing-eyebrow">
+              <span className="eyebrow-pulse" />
+              MOGOU CREATIVE OS <span className="eyebrow-divider" />
+              为长期创作而生
+            </div>
             <div className="landing-mantra">把一个想法交给 AI</div>
-            <h1>让灵感，<br /><em>长成一部作品。</em></h1>
-            <p className="landing-lede">墨构把散落的灵感、复杂的设定与漫长的写作，收束成一条可持续的创作轨道。你负责想象，AI 负责让故事始终向前。</p>
+            <h1>
+              让灵感，
+              <br />
+              <em>长成一部作品。</em>
+            </h1>
+            <p className="landing-lede">
+              墨构把散落的灵感、复杂的设定与漫长的写作，收束成一条可持续的创作轨道。你负责想象，AI
+              负责让故事始终向前。
+            </p>
             <div className="landing-actions">
-              <button className="landing-primary" onClick={onAiCreate}><span className="landing-button-icon"><Sparkles size={17} /></span>AI 一键创作<span className="landing-button-arrow">↗</span></button>
-              <button className="landing-secondary" onClick={onManualCreate}><span className="landing-play"><Play size={14} fill="currentColor" /></span>从空白开始</button>
+              <button className="landing-primary" onClick={onAiCreate}>
+                <span className="landing-button-icon">
+                  <Sparkles size={17} />
+                </span>
+                AI 一键创作<span className="landing-button-arrow">↗</span>
+              </button>
+              <button className="landing-secondary" onClick={onManualCreate}>
+                <span className="landing-play">
+                  <Play size={14} fill="currentColor" />
+                </span>
+                从空白开始
+              </button>
+              <button className="landing-secondary" onClick={onImportTxt}>
+                <Import size={15} />
+                导入本地书
+              </button>
             </div>
             <div className="landing-trust-row">
-              <span><Check size={13} />本地优先</span>
-              <span><ShieldCheck size={13} />你的故事只属于你</span>
-              <span><Feather size={13} />支持长篇连载</span>
+              <span>
+                <Check size={13} />
+                本地优先
+              </span>
+              <span>
+                <ShieldCheck size={13} />
+                你的故事只属于你
+              </span>
+              <span>
+                <Feather size={13} />
+                支持长篇连载
+              </span>
             </div>
           </div>
 
           <div className="landing-stage" aria-label="墨构工作台预览">
             <div className="stage-glow" aria-hidden="true" />
             <div className="stage-window">
-              <div className="stage-window-bar"><span className="stage-dots"><i /><i /><i /></span><span className="stage-window-title">雾城来信 · 创作中</span><span className="stage-live"><span />LIVE</span></div>
+              <div className="stage-window-bar">
+                <span className="stage-dots">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span className="stage-window-title">雾城来信 · 创作中</span>
+                <span className="stage-live">
+                  <span />
+                  LIVE
+                </span>
+              </div>
               <div className="stage-workspace">
                 <div className="stage-rail">
-                  <div className="stage-brand-mark"><Feather size={14} /></div>
-                  <span className="stage-rail-item active"><BookOpenText size={14} /></span>
-                  <span className="stage-rail-item"><UsersRound size={14} /></span>
-                  <span className="stage-rail-item"><Globe2 size={14} /></span>
-                  <span className="stage-rail-item"><BrainCircuit size={14} /></span>
-                  <span className="stage-rail-item"><BookMarked size={14} /></span>
+                  <div className="stage-brand-mark">
+                    <Feather size={14} />
+                  </div>
+                  <span className="stage-rail-item active">
+                    <BookOpenText size={14} />
+                  </span>
+                  <span className="stage-rail-item">
+                    <UsersRound size={14} />
+                  </span>
+                  <span className="stage-rail-item">
+                    <Globe2 size={14} />
+                  </span>
+                  <span className="stage-rail-item">
+                    <BrainCircuit size={14} />
+                  </span>
+                  <span className="stage-rail-item">
+                    <BookMarked size={14} />
+                  </span>
                 </div>
                 <div className="stage-chapters">
-                  <div className="stage-chapter-head"><span>章节</span><small>12 / 36</small></div>
-                  <div className="stage-search"><span />搜索章节</div>
-                  <div className="stage-chapter-row active"><b>01</b><span><strong>潮汐后的来信</strong><small>已完成 · 2,486 字</small></span><i /></div>
-                  <div className="stage-chapter-row"><b>02</b><span><strong>没有寄件人的包裹</strong><small>已完成 · 2,713 字</small></span><i /></div>
-                  <div className="stage-chapter-row"><b>03</b><span><strong>凌晨四点的回声</strong><small>正在修订</small></span><i className="working" /></div>
+                  <div className="stage-chapter-head">
+                    <span>章节</span>
+                    <small>12 / 36</small>
+                  </div>
+                  <div className="stage-search">
+                    <span />
+                    搜索章节
+                  </div>
+                  <div className="stage-chapter-row active">
+                    <b>01</b>
+                    <span>
+                      <strong>潮汐后的来信</strong>
+                      <small>已完成 · 2,486 字</small>
+                    </span>
+                    <i />
+                  </div>
+                  <div className="stage-chapter-row">
+                    <b>02</b>
+                    <span>
+                      <strong>没有寄件人的包裹</strong>
+                      <small>已完成 · 2,713 字</small>
+                    </span>
+                    <i />
+                  </div>
+                  <div className="stage-chapter-row">
+                    <b>03</b>
+                    <span>
+                      <strong>凌晨四点的回声</strong>
+                      <small>正在修订</small>
+                    </span>
+                    <i className="working" />
+                  </div>
                 </div>
                 <div className="stage-editor">
-                  <div className="stage-editor-top"><span>第 03 章</span><span className="stage-saved"><Check size={11} />已保存</span></div>
+                  <div className="stage-editor-top">
+                    <span>第 03 章</span>
+                    <span className="stage-saved">
+                      <Check size={11} />
+                      已保存
+                    </span>
+                  </div>
                   <h3>凌晨四点的回声</h3>
                   <div className="stage-rule" />
-                  <div className="stage-copy"><p>四点十七分，雾城的灯同时熄灭。</p><p>林默站在旧邮局门口，手里的信封没有寄件人，只有一行被雨水晕开的地址。</p><p>他知道这座城市正在隐瞒什么。就像它隐瞒了母亲最后一通电话。</p><span className="stage-caret" /></div>
-                  <div className="stage-editor-foot"><span>本章进度 <b>68%</b></span><span className="stage-progress"><i /></span><span>1,704 / 2,500 字</span></div>
+                  <div className="stage-copy">
+                    <p>四点十七分，雾城的灯同时熄灭。</p>
+                    <p>
+                      林默站在旧邮局门口，手里的信封没有寄件人，只有一行被雨水晕开的地址。
+                    </p>
+                    <p>
+                      他知道这座城市正在隐瞒什么。就像它隐瞒了母亲最后一通电话。
+                    </p>
+                    <span className="stage-caret" />
+                  </div>
+                  <div className="stage-editor-foot">
+                    <span>
+                      本章进度 <b>68%</b>
+                    </span>
+                    <span className="stage-progress">
+                      <i />
+                    </span>
+                    <span>1,704 / 2,500 字</span>
+                  </div>
                 </div>
                 <div className="stage-insight">
-                  <div className="insight-label"><Sparkles size={12} />章节 AI</div>
+                  <div className="insight-label">
+                    <Sparkles size={12} />
+                    章节 AI
+                  </div>
                   <strong>叙事状态</strong>
-                  <div className="insight-chart"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
-                  <div className="insight-score"><span>张力指数</span><b>86</b><small>+12%</small></div>
-                  <div className="insight-note"><span />伏笔回收提醒<small>第 01 章 · 旧邮戳</small></div>
+                  <div className="insight-chart">
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                    <i />
+                  </div>
+                  <div className="insight-score">
+                    <span>张力指数</span>
+                    <b>86</b>
+                    <small>+12%</small>
+                  </div>
+                  <div className="insight-note">
+                    <span />
+                    伏笔回收提醒<small>第 01 章 · 旧邮戳</small>
+                  </div>
                 </div>
               </div>
-              <div className="stage-status"><span><span className="status-online" />AI 正在理解你的故事</span><span>标准成稿流程 · 3 个阶段</span><span className="stage-status-action">查看工作流 ↗</span></div>
+              <div className="stage-status">
+                <span>
+                  <span className="status-online" />
+                  AI 正在理解你的故事
+                </span>
+                <span>标准成稿流程 · 3 个阶段</span>
+                <span className="stage-status-action">查看工作流 ↗</span>
+              </div>
             </div>
-            <div className="stage-caption"><span>一个能记住上下文的创作伙伴</span><span>实时预览</span></div>
+            <div className="stage-caption">
+              <span>一个能记住上下文的创作伙伴</span>
+              <span>实时预览</span>
+            </div>
           </div>
         </section>
 
         <section className="landing-proof" aria-label="产品能力数据">
-          <div className="proof-intro"><span className="proof-kicker">THE LONG GAME</span><strong>写得更远，<br />也写得更像你。</strong></div>
-          <div className="proof-stat"><b>10×</b><span>更快搭建完整世界观</span></div>
-          <div className="proof-stat"><b>100%</b><span>上下文与设定可追溯</span></div>
-          <div className="proof-stat"><b>∞</b><span>属于你的故事可能性</span></div>
+          <div className="proof-intro">
+            <span className="proof-kicker">THE LONG GAME</span>
+            <strong>
+              写得更远，
+              <br />
+              也写得更像你。
+            </strong>
+          </div>
+          <div className="proof-stat">
+            <b>10×</b>
+            <span>更快搭建完整世界观</span>
+          </div>
+          <div className="proof-stat">
+            <b>100%</b>
+            <span>上下文与设定可追溯</span>
+          </div>
+          <div className="proof-stat">
+            <b>∞</b>
+            <span>属于你的故事可能性</span>
+          </div>
         </section>
 
         <section className="landing-features">
-          <div className="landing-section-heading"><div><span className="section-kicker">A BETTER WAY TO WRITE</span><h2>不是替你写，<br /><em>而是让你写得更好。</em></h2></div><p>从第一句灵感到最后一次修订，墨构把创作中最耗心力的部分变成清晰、可掌控的系统。</p></div>
+          <div className="landing-section-heading">
+            <div>
+              <span className="section-kicker">A BETTER WAY TO WRITE</span>
+              <h2>
+                不是替你写，
+                <br />
+                <em>而是让你写得更好。</em>
+              </h2>
+            </div>
+            <p>
+              从第一句灵感到最后一次修订，墨构把创作中最耗心力的部分变成清晰、可掌控的系统。
+            </p>
+          </div>
           <div className="feature-grid">
-            <article className="feature-card feature-card-large"><div className="feature-index">01</div><div className="feature-icon"><Sparkles size={20} /></div><h3>一键生成整部小说</h3><p>输入一个念头，自动展开人物弧光、世界规则、章节钩子与完整初稿。不是随机拼接，而是一条有因果的故事线。</p><span className="feature-link">从创意到大纲 <b>↗</b></span></article>
-            <article className="feature-card"><div className="feature-index">02</div><div className="feature-icon"><BookMarked size={20} /></div><h3>记得住的故事大脑</h3><p>角色、时间线、伏笔和设定集中沉淀，写到长篇后半程也不会丢掉最初的那束光。</p><span className="feature-link">查看记忆系统 <b>↗</b></span></article>
-            <article className="feature-card"><div className="feature-index">03</div><div className="feature-icon"><ListChecks size={20} /></div><h3>每一章都值得发布</h3><p>写作、审读、修订、终审四段质量流程，让灵感落地时依然有节奏、有张力、有完成度。</p><span className="feature-link">了解质量流程 <b>↗</b></span></article>
+            <article className="feature-card feature-card-large">
+              <div className="feature-index">01</div>
+              <div className="feature-icon">
+                <Sparkles size={20} />
+              </div>
+              <h3>一键生成整部小说</h3>
+              <p>
+                输入一个念头，自动展开人物弧光、世界规则、章节钩子与完整初稿。不是随机拼接，而是一条有因果的故事线。
+              </p>
+              <span className="feature-link">
+                从创意到大纲 <b>↗</b>
+              </span>
+            </article>
+            <article className="feature-card">
+              <div className="feature-index">02</div>
+              <div className="feature-icon">
+                <BookMarked size={20} />
+              </div>
+              <h3>记得住的故事大脑</h3>
+              <p>
+                角色、时间线、伏笔和设定集中沉淀，写到长篇后半程也不会丢掉最初的那束光。
+              </p>
+              <span className="feature-link">
+                查看记忆系统 <b>↗</b>
+              </span>
+            </article>
+            <article className="feature-card">
+              <div className="feature-index">03</div>
+              <div className="feature-icon">
+                <ListChecks size={20} />
+              </div>
+              <h3>每一章都值得发布</h3>
+              <p>
+                写作、审读、修订三段质量流程，让灵感落地时依然有节奏、有张力、有完成度。
+              </p>
+              <span className="feature-link">
+                了解质量流程 <b>↗</b>
+              </span>
+            </article>
           </div>
         </section>
 
         <section className="landing-workflow">
-          <div className="workflow-copy"><span className="section-kicker">FROM IDEA TO INK</span><h2>把创作变成<br /><em>一条可走的路。</em></h2><p>你不需要一次想清楚整本书。墨构会在每一个关键节点，给你足够的方向，也留下足够的自由。</p><button className="workflow-link" onClick={onAiCreate}>开始你的第一章 <span>↗</span></button></div>
+          <div className="workflow-copy">
+            <span className="section-kicker">FROM IDEA TO INK</span>
+            <h2>
+              把创作变成
+              <br />
+              <em>一条可走的路。</em>
+            </h2>
+            <p>
+              你不需要一次想清楚整本书。墨构会在每一个关键节点，给你足够的方向，也留下足够的自由。
+            </p>
+            <button className="workflow-link" onClick={onAiCreate}>
+              开始你的第一章 <span>↗</span>
+            </button>
+          </div>
           <div className="workflow-steps">
-            <div className="workflow-step active"><span className="workflow-number">01</span><div><strong>种下一个念头</strong><p>一句话、一幅画面，或一个挥之不去的问题。</p></div><Sparkles size={17} /></div>
+            <div className="workflow-step active">
+              <span className="workflow-number">01</span>
+              <div>
+                <strong>种下一个念头</strong>
+                <p>一句话、一幅画面，或一个挥之不去的问题。</p>
+              </div>
+              <Sparkles size={17} />
+            </div>
             <div className="workflow-line" />
-            <div className="workflow-step"><span className="workflow-number">02</span><div><strong>长出一座世界</strong><p>人物、规则、关系与命运开始彼此咬合。</p></div><Globe2 size={17} /></div>
+            <div className="workflow-step">
+              <span className="workflow-number">02</span>
+              <div>
+                <strong>长出一座世界</strong>
+                <p>人物、规则、关系与命运开始彼此咬合。</p>
+              </div>
+              <Globe2 size={17} />
+            </div>
             <div className="workflow-line" />
-            <div className="workflow-step"><span className="workflow-number">03</span><div><strong>留下你的笔迹</strong><p>AI 扩展可能性，你决定故事最终的方向。</p></div><Feather size={17} /></div>
+            <div className="workflow-step">
+              <span className="workflow-number">03</span>
+              <div>
+                <strong>留下你的笔迹</strong>
+                <p>AI 扩展可能性，你决定故事最终的方向。</p>
+              </div>
+              <Feather size={17} />
+            </div>
           </div>
         </section>
 
-        <footer className="landing-footer"><span><Feather size={14} />墨构 MOGOU STUDIO</span><span>AI 小说创作工作台 · v0.1</span><span>Made for stories that stay with you.</span></footer>
+        <footer className="landing-footer">
+          <span>
+            <Feather size={14} />
+            墨构 MOGOU STUDIO
+          </span>
+          <span>AI 小说创作工作台 · v0.1</span>
+          <span>Made for stories that stay with you.</span>
+        </footer>
       </div>
     </div>
-  )
+  );
 }
 
 function InkPet({ working = false }: { working?: boolean }) {
   return (
-    <span className={`ink-pet-wrap ${working ? 'working' : ''}`}>
+    <span className={`ink-pet-wrap ${working ? "working" : ""}`}>
       <img className="ink-pet" src="/ink-robot.svg" alt="" aria-hidden="true" />
-      {working ? <span className="ink-pet-spark" aria-hidden="true">✦</span> : null}
+      {working ? (
+        <span className="ink-pet-spark" aria-hidden="true">
+          ✦
+        </span>
+      ) : null}
     </span>
-  )
+  );
 }
 
 function HomeDashboard({
   data,
   onOpenProject,
   onCreate,
+  onImportTxt,
   onDeleteProject,
 }: {
-  data: AppData
-  onOpenProject: (projectId: string) => void
-  onCreate: () => void
-  onDeleteProject: (project: NovelProject) => void
+  data: AppData;
+  onOpenProject: (projectId: string) => void;
+  onCreate: () => void;
+  onImportTxt: () => void;
+  onDeleteProject: (project: NovelProject) => void;
 }) {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
   const allUsage = [
     ...(data.aiUsage ?? []),
     ...data.projects.flatMap((project) => project.aiUsage ?? []),
-  ]
-  const usageToday = allUsage.filter((item) => new Date(item.date).getTime() >= today.getTime())
-  const todayTokens = usageToday.reduce((sum, item) => sum + item.totalTokens, 0)
-  const todayWords = usageToday.reduce((sum, item) => sum + item.words, 0)
-  const totalWords = data.projects.reduce((sum, project) => sum + project.chapters.reduce((chapterSum, chapter) => chapterSum + countWords(chapter.content), 0), 0)
-  const modelUsage = [...allUsage.reduce((map, item) => {
-    const key = `${item.providerId}:${item.model}`
-    const existing = map.get(key)
-    map.set(key, {
-      providerId: item.providerId,
-      model: item.model,
-      tokens: (existing?.tokens ?? 0) + item.totalTokens,
-      calls: (existing?.calls ?? 0) + 1,
-    })
-    return map
-  }, new Map<string, { providerId: string; model: string; tokens: number; calls: number }>()).values()].sort((left, right) => right.tokens - left.tokens)
-  const formatNumber = (value: number) => value.toLocaleString('zh-CN')
-  const formatDate = (value: number) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }).format(new Date(value))
-  const runningProject = data.projects.find((project) => project.generation?.status === 'generating')
-  const runningProvider = data.settings.providers.find((provider) => provider.id === runningProject?.generation?.providerId)
-  const modelHeadline = runningProvider?.model || modelUsage[0]?.model || '尚未使用'
+  ];
+  const usageToday = allUsage.filter(
+    (item) => new Date(item.date).getTime() >= today.getTime(),
+  );
+  const todayTokens = usageToday.reduce(
+    (sum, item) => sum + item.totalTokens,
+    0,
+  );
+  const todayWords = usageToday.reduce((sum, item) => sum + item.words, 0);
+  const totalWords = data.projects.reduce(
+    (sum, project) =>
+      sum +
+      project.chapters.reduce(
+        (chapterSum, chapter) => chapterSum + countWords(chapter.content),
+        0,
+      ),
+    0,
+  );
+  const modelUsage = [
+    ...allUsage
+      .reduce((map, item) => {
+        const key = `${item.providerId}:${item.model}`;
+        const existing = map.get(key);
+        map.set(key, {
+          providerId: item.providerId,
+          model: item.model,
+          tokens: (existing?.tokens ?? 0) + item.totalTokens,
+          calls: (existing?.calls ?? 0) + 1,
+        });
+        return map;
+      }, new Map<string, { providerId: string; model: string; tokens: number; calls: number }>())
+      .values(),
+  ].sort((left, right) => right.tokens - left.tokens);
+  const formatNumber = (value: number) => value.toLocaleString("zh-CN");
+  const formatDate = (value: number) =>
+    new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(
+      new Date(value),
+    );
+  const runningProject = data.projects.find(
+    (project) => project.generation?.status === "generating",
+  );
+  const runningProvider = data.settings.providers.find(
+    (provider) => provider.id === runningProject?.generation?.providerId,
+  );
+  const modelHeadline =
+    runningProvider?.model || modelUsage[0]?.model || "尚未使用";
   const modelDetail = runningProject?.generation
     ? `正在生成《${runningProject.title}》· ${runningProvider?.name ?? runningProject.generation.providerId}`
-    : modelUsage[0] ? `${formatNumber(modelUsage[0].tokens)} Token · ${modelUsage[0].calls} 次调用` : '配置模型后开始创作'
+    : modelUsage[0]
+      ? `${formatNumber(modelUsage[0].tokens)} Token · ${modelUsage[0].calls} 次调用`
+      : "配置模型后开始创作";
 
   return (
     <div className="home-dashboard page-scroll">
       <div className="home-dashboard-head">
         <div>
-          <span className="home-eyebrow"><span />MOGOU CREATIVE OS</span>
-          <h1>你的故事，<em>正在发生。</em></h1>
+          <span className="home-eyebrow">
+            <span />
+            MOGOU CREATIVE OS
+          </span>
+          <h1>
+            你的故事，<em>正在发生。</em>
+          </h1>
           <p>所有作品、每一次思考和每一行新字，都在这里留下轨迹。</p>
         </div>
-        <button className="primary-button home-create-button" onClick={onCreate}><Sparkles size={17} />开始一部新小说<ArrowUpRight size={16} /></button>
+        <div className="home-create-actions">
+          <button
+            className="primary-button home-create-button"
+            onClick={onCreate}
+          >
+            <Sparkles size={17} />
+            开始一部新小说
+            <ArrowUpRight size={16} />
+          </button>
+          <button
+            className="secondary-button home-import-button"
+            onClick={onImportTxt}
+          >
+            <Import size={16} />
+            导入本地书
+          </button>
+        </div>
       </div>
 
       <section className="home-stats" aria-label="创作统计">
-        <article className="home-stat-card featured"><div className="home-stat-icon"><BarChart3 size={19} /></div><span>今日 Token</span><strong>{formatNumber(todayTokens)}</strong><small>{usageToday.length ? `${usageToday.length} 次 AI 调用` : '今天还没有 AI 调用'}</small></article>
-        <article className="home-stat-card"><div className="home-stat-icon"><Feather size={19} /></div><span>今日 AI 产出</span><strong>{formatNumber(todayWords)} <small>字</small></strong><small>来自生成、续写与修订</small></article>
-        <article className="home-stat-card"><div className="home-stat-icon"><BookOpenText size={19} /></div><span>作品总字数</span><strong>{formatNumber(totalWords)} <small>字</small></strong><small>{data.projects.length} 部作品 · {data.projects.reduce((sum, project) => sum + project.chapters.length, 0)} 个章节</small></article>
-        <article className={`home-stat-card ${runningProject ? 'model-running' : ''}`}><div className="home-stat-icon"><Bot size={19} /></div><span>{runningProject ? '正在使用模型' : '主要模型'}</span><strong>{modelHeadline}</strong><small>{modelDetail}</small></article>
+        <article className="home-stat-card featured">
+          <div className="home-stat-icon">
+            <BarChart3 size={19} />
+          </div>
+          <span>今日 Token</span>
+          <strong>{formatNumber(todayTokens)}</strong>
+          <small>
+            {usageToday.length
+              ? `${usageToday.length} 次 AI 调用`
+              : "今天还没有 AI 调用"}
+          </small>
+        </article>
+        <article className="home-stat-card">
+          <div className="home-stat-icon">
+            <Feather size={19} />
+          </div>
+          <span>今日 AI 产出</span>
+          <strong>
+            {formatNumber(todayWords)} <small>字</small>
+          </strong>
+          <small>来自生成、续写与修订</small>
+        </article>
+        <article className="home-stat-card">
+          <div className="home-stat-icon">
+            <BookOpenText size={19} />
+          </div>
+          <span>作品总字数</span>
+          <strong>
+            {formatNumber(totalWords)} <small>字</small>
+          </strong>
+          <small>
+            {data.projects.length} 部作品 ·{" "}
+            {data.projects.reduce(
+              (sum, project) => sum + project.chapters.length,
+              0,
+            )}{" "}
+            个章节
+          </small>
+        </article>
+        <article
+          className={`home-stat-card ${runningProject ? "model-running" : ""}`}
+        >
+          <div className="home-stat-icon">
+            <Bot size={19} />
+          </div>
+          <span>{runningProject ? "正在使用模型" : "主要模型"}</span>
+          <strong>{modelHeadline}</strong>
+          <small>{modelDetail}</small>
+        </article>
       </section>
 
       <div className="home-content-grid">
         <section className="home-projects-section">
-          <div className="home-section-head"><div><span className="home-section-kicker">YOUR LIBRARY</span><h2>作品空间</h2></div><span>{data.projects.length} 部作品</span></div>
+          <div className="home-section-head">
+            <div>
+              <span className="home-section-kicker">YOUR LIBRARY</span>
+              <h2>作品空间</h2>
+            </div>
+            <span>{data.projects.length} 部作品</span>
+          </div>
           {data.projects.length ? (
             <div className="home-project-grid">
               {data.projects.map((project) => {
-                const words = project.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0)
-                const doneChapters = project.chapters.filter((chapter) => chapter.content.trim()).length
-                return <article className="home-project-card" key={project.id} onClick={() => onOpenProject(project.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onOpenProject(project.id) }}>
-                  <div className="project-card-cover" style={{ '--project-cover': project.coverColor } as CSSProperties}><span>{project.title.slice(0, 1)}</span><i /></div>
-                  <div className="project-card-body"><div className="project-card-top"><span>{project.genre || '未分类'}</span><button className="project-delete-button" onClick={(event) => { event.stopPropagation(); onDeleteProject(project) }} aria-label={`删除《${project.title}》`} title="删除作品"><Trash2 size={15} /></button></div><h3>{project.title}</h3><p>{project.synopsis || '还没有简介，从第一章开始吧。'}</p><div className="project-card-meta"><span>{doneChapters} / {project.chapters.length} 章</span><span>{formatNumber(words)} 字</span><span>{formatDate(project.updatedAt)}</span></div><div className="project-card-footer"><span className="project-card-open">打开作品 <ArrowUpRight size={14} /></span><span className="project-card-bar"><i style={{ width: `${project.chapters.length ? Math.min(100, Math.round(doneChapters / project.chapters.length * 100)) : 0}%` }} /></span></div></div>
-                </article>
+                const words = project.chapters.reduce(
+                  (sum, chapter) => sum + countWords(chapter.content),
+                  0,
+                );
+                const doneChapters = project.chapters.filter((chapter) =>
+                  chapter.content.trim(),
+                ).length;
+                return (
+                  <article
+                    className="home-project-card"
+                    key={project.id}
+                    onClick={() => onOpenProject(project.id)}
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ")
+                        onOpenProject(project.id);
+                    }}
+                  >
+                    <div
+                      className="project-card-cover"
+                      style={
+                        {
+                          "--project-cover": project.coverColor,
+                        } as CSSProperties
+                      }
+                    >
+                      <span>{project.title.slice(0, 1)}</span>
+                      <i />
+                    </div>
+                    <div className="project-card-body">
+                      <div className="project-card-top">
+                        <span>{project.genre || "未分类"}</span>
+                        <button
+                          className="project-delete-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDeleteProject(project);
+                          }}
+                          aria-label={`删除《${project.title}》`}
+                          title="删除作品"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                      <h3>{project.title}</h3>
+                      <p>
+                        {project.synopsis || "还没有简介，从第一章开始吧。"}
+                      </p>
+                      <div className="project-card-meta">
+                        <span>
+                          {doneChapters} / {project.chapters.length} 章
+                        </span>
+                        <span>{formatNumber(words)} 字</span>
+                        <span>{formatDate(project.updatedAt)}</span>
+                      </div>
+                      <div className="project-card-footer">
+                        <span className="project-card-open">
+                          打开作品 <ArrowUpRight size={14} />
+                        </span>
+                        <span className="project-card-bar">
+                          <i
+                            style={{
+                              width: `${project.chapters.length ? Math.min(100, Math.round((doneChapters / project.chapters.length) * 100)) : 0}%`,
+                            }}
+                          />
+                        </span>
+                      </div>
+                    </div>
+                  </article>
+                );
               })}
             </div>
           ) : (
-            <div className="home-empty-projects"><div className="home-empty-mark"><Feather size={25} /></div><h3>还没有作品</h3><p>从一个念头开始，建立你的第一座故事世界。</p><button className="primary-button" onClick={onCreate}><Plus size={16} />创建第一部小说</button></div>
+            <div className="home-empty-projects">
+              <div className="home-empty-mark">
+                <Feather size={25} />
+              </div>
+              <h3>还没有作品</h3>
+              <p>从一个念头开始，建立你的第一座故事世界。</p>
+              <div className="home-empty-actions">
+                <button className="primary-button" onClick={onCreate}>
+                  <Plus size={16} />
+                  创建第一部小说
+                </button>
+                <button className="secondary-button" onClick={onImportTxt}>
+                  <Import size={16} />
+                  导入本地书
+                </button>
+              </div>
+            </div>
           )}
         </section>
 
-        <aside className="home-usage-panel"><div className="home-section-head"><div><span className="home-section-kicker">AI TOKEN METER</span><h2>模型用量</h2></div><span>累计</span></div><div className="usage-pet-display"><div className="usage-token-primary"><span>今日 Token</span><strong>{formatNumber(todayTokens)}</strong><small>{usageToday.length ? `${usageToday.length} 次 AI 调用 · ${formatNumber(todayWords)} 字产出` : '今天还没有 AI 调用'}</small><i><span style={{ width: `${Math.min(100, Math.max(7, Math.round(todayTokens / 1000)))}%` }} /></i></div><div className="usage-pet-art"><InkPet working={todayTokens > 0} /><span className="usage-pet-label">AI 机器人</span></div></div>{modelUsage.length ? <div className="model-usage-list">{modelUsage.slice(0, 5).map((item, index) => <div className="model-usage-row" key={`${item.providerId}:${item.model}`}><span className={`model-usage-rank rank-${index + 1}`}>{String(index + 1).padStart(2, '0')}</span><ProviderMark id={item.providerId} /><span className="model-usage-name"><strong>{item.model}</strong><small>{item.calls} 次调用</small></span><span className="model-usage-tokens">{formatNumber(item.tokens)}<small> Token</small></span></div>)}</div> : <div className="home-usage-empty"><Bot size={24} /><p>使用 AI 后<br />这里会显示模型用量</p></div>}<div className="home-usage-foot"><Clock3 size={13} />统计数据保存在本地浏览器</div></aside>
+        <aside className="home-usage-panel">
+          <div className="home-section-head">
+            <div>
+              <span className="home-section-kicker">AI TOKEN METER</span>
+              <h2>模型用量</h2>
+            </div>
+            <span>累计</span>
+          </div>
+          <div className="usage-pet-display">
+            <div className="usage-token-primary">
+              <span>今日 Token</span>
+              <strong>{formatNumber(todayTokens)}</strong>
+              <small>
+                {usageToday.length
+                  ? `${usageToday.length} 次 AI 调用 · ${formatNumber(todayWords)} 字产出`
+                  : "今天还没有 AI 调用"}
+              </small>
+              <i>
+                <span
+                  style={{
+                    width: `${Math.min(100, Math.max(7, Math.round(todayTokens / 1000)))}%`,
+                  }}
+                />
+              </i>
+            </div>
+            <div className="usage-pet-art">
+              <InkPet working={todayTokens > 0} />
+              <span className="usage-pet-label">AI 机器人</span>
+            </div>
+          </div>
+          {modelUsage.length ? (
+            <div className="model-usage-list">
+              {modelUsage.slice(0, 5).map((item, index) => (
+                <div
+                  className="model-usage-row"
+                  key={`${item.providerId}:${item.model}`}
+                >
+                  <span className={`model-usage-rank rank-${index + 1}`}>
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <ProviderMark id={item.providerId} />
+                  <span className="model-usage-name">
+                    <strong>{item.model}</strong>
+                    <small>{item.calls} 次调用</small>
+                  </span>
+                  <span className="model-usage-tokens">
+                    {formatNumber(item.tokens)}
+                    <small> Token</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="home-usage-empty">
+              <Bot size={24} />
+              <p>
+                使用 AI 后<br />
+                这里会显示模型用量
+              </p>
+            </div>
+          )}
+          <div className="home-usage-foot">
+            <Clock3 size={13} />
+            统计数据保存在本地浏览器
+          </div>
+        </aside>
       </div>
 
-      <div className="home-dashboard-foot"><span><ShieldCheck size={14} />本地优先 · 你的创作数据只属于你</span><span>最近更新 {data.projects[0] ? formatDate(data.projects[0].updatedAt) : '今天'}</span></div>
+      <div className="home-dashboard-foot">
+        <span>
+          <ShieldCheck size={14} />
+          本地优先 · 你的创作数据只属于你
+        </span>
+        <span>
+          最近更新{" "}
+          {data.projects[0] ? formatDate(data.projects[0].updatedAt) : "今天"}
+        </span>
+      </div>
     </div>
-  )
+  );
 }
 
 interface OutlineEditorProps {
-  project: NovelProject
-  providers: AppData['settings']['providers']
-  selectedChapterId: string | null
-  onSelectChapter: (id: string) => void
-  onUpdate: (updater: (project: NovelProject) => NovelProject) => void
-  aiOpen: boolean
-  onToggleAi: () => void
-  onToast: (message: string) => void
-  onPause: () => void
-  onResume: () => void
+  project: NovelProject;
+  providers: AppData["settings"]["providers"];
+  activeProviderId: string;
+  selectedChapterId: string | null;
+  onSelectChapter: (id: string) => void;
+  onUpdate: (updater: (project: NovelProject) => NovelProject) => void;
+  aiOpen: boolean;
+  onToggleAi: () => void;
+  onToast: (message: string) => void;
+  onPause: () => void;
+  onResume: () => void;
+  onOpenToolkit: () => void;
 }
 
-function OutlineEditor({ project, providers, selectedChapterId, onSelectChapter, onUpdate, aiOpen, onToggleAi, onToast, onPause, onResume }: OutlineEditorProps) {
-  const [query, setQuery] = useState('')
-  const [chapterSettingsOpen, setChapterSettingsOpen] = useState(false)
-  const [chapterSearchOpen, setChapterSearchOpen] = useState(false)
-  const [previewMode, setPreviewMode] = useState(false)
-  const liveCopyRef = useRef<HTMLDivElement | null>(null)
-  const liveFollowRef = useRef(true)
-  const [liveFollowing, setLiveFollowing] = useState(true)
-  const chapter = project.chapters.find((item) => item.id === selectedChapterId) ?? null
+function OutlineEditor({
+  project,
+  providers,
+  activeProviderId,
+  selectedChapterId,
+  onSelectChapter,
+  onUpdate,
+  aiOpen,
+  onToggleAi,
+  onToast,
+  onPause,
+  onResume,
+  onOpenToolkit,
+}: OutlineEditorProps) {
+  const [query, setQuery] = useState("");
+  const [chapterSettingsOpen, setChapterSettingsOpen] = useState(false);
+  const [chapterSearchOpen, setChapterSearchOpen] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
+  const liveCopyRef = useRef<HTMLDivElement | null>(null);
+  const liveFollowRef = useRef(true);
+  const [liveFollowing, setLiveFollowing] = useState(true);
+  const chapter =
+    project.chapters.find((item) => item.id === selectedChapterId) ?? null;
   const filteredChapters = useMemo(() => {
-    const keyword = query.trim().toLowerCase()
-    if (!keyword) return project.chapters
-    return project.chapters.filter((item) => `${item.title} ${item.summary}`.toLowerCase().includes(keyword))
-  }, [project.chapters, query])
-  const totalWords = project.chapters.reduce((sum, item) => sum + countWords(item.content), 0)
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return project.chapters;
+    return project.chapters.filter((item) =>
+      `${item.title} ${item.summary}`.toLowerCase().includes(keyword),
+    );
+  }, [project.chapters, query]);
+  const totalWords = project.chapters.reduce(
+    (sum, item) => sum + countWords(item.content),
+    0,
+  );
   useEffect(() => {
-    const element = liveCopyRef.current
-    if (!element || chapter?.generationStatus !== 'generating' || !liveFollowRef.current) return
-    element.scrollTo({ top: element.scrollHeight, behavior: 'auto' })
-  }, [chapter?.content, chapter?.generationStatus])
+    const element = liveCopyRef.current;
+    if (
+      !element ||
+      chapter?.generationStatus !== "generating" ||
+      !liveFollowRef.current
+    )
+      return;
+    element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
+  }, [chapter?.content, chapter?.generationStatus]);
   useEffect(() => {
-    if (chapter?.generationStatus === 'generating') {
-      liveFollowRef.current = true
-      setLiveFollowing(true)
-      liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight })
+    if (chapter?.generationStatus === "generating") {
+      liveFollowRef.current = true;
+      setLiveFollowing(true);
+      liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight });
     }
-  }, [chapter?.id, chapter?.generationStatus])
+  }, [chapter?.id, chapter?.generationStatus]);
   const patchChapter = (patch: Partial<Chapter>) => {
-    if (!chapter) return
+    if (!chapter) return;
     onUpdate((current) => ({
       ...current,
-      chapters: current.chapters.map((item) => item.id === chapter.id
-        ? { ...item, ...patch, updatedAt: now() }
-        : item),
-    }))
-  }
+      chapters: current.chapters.map((item) =>
+        item.id === chapter.id ? { ...item, ...patch, updatedAt: now() } : item,
+      ),
+    }));
+  };
 
   const deleteChapter = () => {
-    if (!chapter) return
-    if (project.chapters.length === 1) return onToast('至少保留一个章节')
-    const index = project.chapters.findIndex((item) => item.id === chapter.id)
-    const next = project.chapters[index + 1] ?? project.chapters[index - 1]
+    if (!chapter) return;
+    if (project.chapters.length === 1) return onToast("至少保留一个章节");
+    const index = project.chapters.findIndex((item) => item.id === chapter.id);
+    const next = project.chapters[index + 1] ?? project.chapters[index - 1];
     onUpdate((current) => ({
       ...current,
       chapters: current.chapters.filter((item) => item.id !== chapter.id),
-      trash: [{
-        id: uid(), kind: 'chapter', title: chapter.title, deletedAt: now(), payload: chapter,
-      }, ...current.trash],
-    }))
-    onSelectChapter(next.id)
-  }
+      trash: [
+        {
+          id: uid(),
+          kind: "chapter",
+          title: chapter.title,
+          deletedAt: now(),
+          payload: chapter,
+        },
+        ...current.trash,
+      ],
+    }));
+    onSelectChapter(next.id);
+  };
 
   const exportChapter = () => {
-    if (!chapter) return
-    const blob = new Blob([`${chapter.title}\n\n${chapter.content}`], { type: 'text/plain;charset=utf-8' })
-    const href = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = href
-    anchor.download = `${project.title}-${chapter.title}.txt`
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(href), 0)
-    onToast('本章已导出')
-  }
+    if (!chapter) return;
+    const blob = new Blob([`${chapter.title}\n\n${chapter.content}`], {
+      type: "text/plain;charset=utf-8",
+    });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = `${project.title}-${chapter.title}.txt`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+    onToast("本章已导出");
+  };
+
+  const exportBook = () => {
+    exportProjectAsTxt(project);
+    onToast("全书已导出为 TXT");
+  };
 
   return (
     <>
       <div className="editor-workspace">
-        <GenerationBanner project={project} providers={providers} onPause={onPause} onResume={onResume} />
+        <GenerationBanner
+          project={project}
+          providers={providers}
+          onPause={onPause}
+          onResume={onResume}
+        />
         <div className="editor-main">
           <aside className="chapter-panel">
             <div className="chapter-panel-head">
               <strong>章节</strong>
               <div className="chapter-panel-actions">
-                <button className="icon-button small" disabled aria-label="撤销章节操作"><Undo2 size={16} /></button>
+                <button
+                  className="icon-button small"
+                  disabled
+                  aria-label="撤销章节操作"
+                >
+                  <Undo2 size={16} />
+                </button>
                 <button
                   className="icon-button small"
                   onClick={() => {
-                    const next = createChapter(project.chapters.length + 1)
-                    onUpdate((current) => ({ ...current, chapters: [...current.chapters, next] }))
-                    onSelectChapter(next.id)
+                    const next = createChapter(project.chapters.length + 1);
+                    onUpdate((current) => ({
+                      ...current,
+                      chapters: [...current.chapters, next],
+                    }));
+                    onSelectChapter(next.id);
                   }}
                   aria-label="新建章节"
                   title="新建章节"
-                ><Plus size={18} /></button>
-                <button className={`icon-button small ${chapterSearchOpen ? 'active' : ''}`} onClick={() => setChapterSearchOpen((open) => !open)} aria-label="筛选章节" title="筛选章节"><SlidersHorizontal size={17} /></button>
+                >
+                  <Plus size={18} />
+                </button>
+                <button
+                  className={`icon-button small ${chapterSearchOpen ? "active" : ""}`}
+                  onClick={() => setChapterSearchOpen((open) => !open)}
+                  aria-label="筛选章节"
+                  title="筛选章节"
+                >
+                  <SlidersHorizontal size={17} />
+                </button>
               </div>
             </div>
-            {chapterSearchOpen ? <label className="chapter-search"><Search size={15} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索章节" /></label> : null}
-            <div className="chapter-preface" title={project.synopsis || '作品序章'}>
-              <BookOpenText size={16} /><span>序 · 引子</span><small>·</small>
+            {chapterSearchOpen ? (
+              <label className="chapter-search">
+                <Search size={15} />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索章节"
+                />
+              </label>
+            ) : null}
+            <div
+              className="chapter-preface"
+              title={project.synopsis || "作品序章"}
+            >
+              <BookOpenText size={16} />
+              <span>序 · 引子</span>
+              <small>·</small>
             </div>
             <div className="chapter-list">
               {filteredChapters.map((item, index) => (
-                <button key={item.id} className={`chapter-row ${item.id === chapter?.id ? 'active' : ''}`} onClick={() => onSelectChapter(item.id)}>
-                  <span className="chapter-index">{String(index + 1).padStart(2, '0')}</span>
+                <button
+                  key={item.id}
+                  className={`chapter-row ${item.id === chapter?.id ? "active" : ""}`}
+                  onClick={() => onSelectChapter(item.id)}
+                >
+                  <span className="chapter-index">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
                   <span className="chapter-info">
                     <strong>{item.title}</strong>
-                    <small>{countWords(item.content).toLocaleString()} 字</small>
+                    <small>
+                      {countWords(item.content).toLocaleString()} 字
+                    </small>
                   </span>
-                  {item.generationStatus === 'generating' ? <LoaderCircle className="spin chapter-generating" size={13} /> : (
-                    <span className={`status-dot ${item.generationStatus === 'done' ? 'done' : item.status}`} />
+                  {item.generationStatus === "generating" ? (
+                    <LoaderCircle
+                      className="spin chapter-generating"
+                      size={13}
+                    />
+                  ) : (
+                    <span
+                      className={`status-dot ${item.generationStatus === "done" ? "done" : item.status}`}
+                    />
                   )}
                 </button>
               ))}
@@ -1219,70 +3469,195 @@ function OutlineEditor({ project, providers, selectedChapterId, onSelectChapter,
             <section className="writing-pane">
               <div className="writing-toolbar">
                 <div className="history-buttons">
-                  <button className="icon-button small" disabled aria-label="撤销" title="使用 Ctrl+Z 撤销"><Undo2 size={17} /></button>
-                  <button className="icon-button small" disabled aria-label="重做" title="使用 Ctrl+Shift+Z 重做"><Redo2 size={17} /></button>
+                  <button
+                    className="icon-button small"
+                    disabled
+                    aria-label="撤销"
+                    title="使用 Ctrl+Z 撤销"
+                  >
+                    <Undo2 size={17} />
+                  </button>
+                  <button
+                    className="icon-button small"
+                    disabled
+                    aria-label="重做"
+                    title="使用 Ctrl+Shift+Z 重做"
+                  >
+                    <Redo2 size={17} />
+                  </button>
                 </div>
                 <div className="writing-meta">
-                  <span className="saved-state"><Check size={14} />已自动保存</span>
-                  <button className={`secondary-button compact mode-button edit-mode-button ${!previewMode ? 'active' : ''}`} onClick={() => setPreviewMode(false)}><PenLine size={14} />编辑模式</button>
-                  <button className={`secondary-button compact mode-button preview-mode-button ${previewMode ? 'active' : ''}`} onClick={() => setPreviewMode(true)}><Eye size={14} />预览模式</button>
+                  <span className="saved-state">
+                    <Check size={14} />
+                    已自动保存
+                  </span>
+                  <button
+                    className={`secondary-button compact mode-button edit-mode-button ${!previewMode ? "active" : ""}`}
+                    onClick={() => setPreviewMode(false)}
+                  >
+                    <PenLine size={14} />
+                    编辑模式
+                  </button>
+                  <button
+                    className={`secondary-button compact mode-button preview-mode-button ${previewMode ? "active" : ""}`}
+                    onClick={() => setPreviewMode(true)}
+                  >
+                    <Eye size={14} />
+                    预览模式
+                  </button>
                   <details className="chapter-action-menu">
-                    <summary className="secondary-button compact"><Download size={14} />导出<ChevronDown size={13} /></summary>
+                    <summary className="secondary-button compact">
+                      <Download size={14} />
+                      导出
+                      <ChevronDown size={13} />
+                    </summary>
                     <div>
-                      <button onClick={exportChapter}><Download size={14} />导出本章</button>
-                      <button onClick={onToggleAi}><MessageSquareText size={14} />打开 AI 助手</button>
-                      <button onClick={() => setChapterSettingsOpen(true)}><SlidersHorizontal size={14} />章节设置</button>
-                      <button className="danger" onClick={deleteChapter}><Trash2 size={14} />移到回收站</button>
+                      <button onClick={exportChapter}>
+                        <Download size={14} />
+                        导出本章
+                      </button>
+                      <button onClick={exportBook}>
+                        <FileText size={14} />
+                        导出全书 TXT
+                      </button>
+                      <button onClick={onOpenToolkit}>
+                        <WandSparkles size={14} />
+                        作品工具
+                      </button>
+                      <button onClick={onToggleAi}>
+                        <MessageSquareText size={14} />
+                        打开 AI 助手
+                      </button>
+                      <button onClick={() => setChapterSettingsOpen(true)}>
+                        <SlidersHorizontal size={14} />
+                        章节设置
+                      </button>
+                      <button className="danger" onClick={deleteChapter}>
+                        <Trash2 size={14} />
+                        移到回收站
+                      </button>
                     </div>
                   </details>
-                  <button className="icon-button small" disabled aria-label="恢复上一步"><Undo2 size={17} /></button>
+                  <button
+                    className="icon-button small"
+                    disabled
+                    aria-label="恢复上一步"
+                  >
+                    <Undo2 size={17} />
+                  </button>
                 </div>
               </div>
               <div className="paper">
-                <span className="paper-decoration paper-bamboo-art" aria-hidden="true" />
-                <span className="paper-decoration paper-pavilion-art" aria-hidden="true" />
-                <span className="paper-decoration paper-mist-art" aria-hidden="true" />
-                <input className="chapter-title-input" value={chapter.title} onChange={(event) => patchChapter({ title: event.target.value })} readOnly={previewMode} aria-label="章节标题" />
-                {chapter.generationStatus === 'generating' ? (
+                <input
+                  className="chapter-title-input"
+                  value={chapter.title}
+                  onChange={(event) =>
+                    patchChapter({ title: event.target.value })
+                  }
+                  readOnly={previewMode}
+                  aria-label="章节标题"
+                />
+                {chapter.generationStatus === "generating" ? (
                   <div className="live-manuscript" aria-live="polite">
                     <div className="live-generation-strip">
-                      <span><span className="live-sigil">☯</span>{chapter.workflowStage ? workflowStageLabels[chapter.workflowStage] : 'AI 正在生成'}</span>
-                      <small>{countWords(chapter.content).toLocaleString()} 字</small>
+                      <span>
+                        <span className="live-sigil">☯</span>
+                        {chapter.workflowStage
+                          ? workflowStageLabels[chapter.workflowStage]
+                          : "AI 正在生成"}
+                      </span>
+                      <small>
+                        {countWords(chapter.content).toLocaleString()} 字
+                      </small>
                     </div>
-                    <div className="live-manuscript-copy" ref={liveCopyRef} onScroll={(event) => {
-                      const element = event.currentTarget
-                      const distance = element.scrollHeight - element.scrollTop - element.clientHeight
-                      const following = distance < 48
-                      liveFollowRef.current = following
-                      setLiveFollowing(following)
-                    }}>
-                      {chapter.content || <span className="live-placeholder">正在组织开篇场景与人物行动</span>}
+                    <div
+                      className="live-manuscript-copy"
+                      ref={liveCopyRef}
+                      onScroll={(event) => {
+                        const element = event.currentTarget;
+                        const distance =
+                          element.scrollHeight -
+                          element.scrollTop -
+                          element.clientHeight;
+                        const following = distance < 48;
+                        liveFollowRef.current = following;
+                        setLiveFollowing(following);
+                      }}
+                    >
+                      {chapter.content || (
+                        <span className="live-placeholder">
+                          正在组织开篇场景与人物行动
+                        </span>
+                      )}
                       <i className="streaming-caret" />
                     </div>
-                    {!liveFollowing ? <button className="live-follow-button" type="button" onClick={() => { liveFollowRef.current = true; setLiveFollowing(true); liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight, behavior: 'smooth' }) }}><ArrowDownToLine size={13} />跟随最新内容</button> : null}
+                    {!liveFollowing ? (
+                      <button
+                        className="live-follow-button"
+                        type="button"
+                        onClick={() => {
+                          liveFollowRef.current = true;
+                          setLiveFollowing(true);
+                          liveCopyRef.current?.scrollTo({
+                            top: liveCopyRef.current.scrollHeight,
+                            behavior: "smooth",
+                          });
+                        }}
+                      >
+                        <ArrowDownToLine size={13} />
+                        跟随最新内容
+                      </button>
+                    ) : null}
                   </div>
                 ) : previewMode ? (
-                  <div className="manuscript manuscript-preview">{chapter.content || <span className="live-placeholder">本章暂无正文</span>}</div>
+                  <div className="manuscript manuscript-preview">
+                    {chapter.content || (
+                      <span className="live-placeholder">本章暂无正文</span>
+                    )}
+                  </div>
                 ) : (
                   <textarea
                     className="manuscript"
                     value={chapter.content}
-                    onChange={(event) => patchChapter({ content: event.target.value })}
+                    onChange={(event) =>
+                      patchChapter({ content: event.target.value })
+                    }
                     placeholder="从这里开始写作……"
                     spellCheck={false}
                   />
                 )}
               </div>
               <footer className="editor-statusbar">
-                <span>本章 {countWords(chapter.content).toLocaleString()} 字</span>
+                <span>
+                  本章 {countWords(chapter.content).toLocaleString()} 字
+                </span>
                 <i />
-                <span>预计 {Math.max(1, Math.ceil(countWords(chapter.content) / 450))} 分钟</span>
+                <span>
+                  预计{" "}
+                  {Math.max(1, Math.ceil(countWords(chapter.content) / 450))}{" "}
+                  分钟
+                </span>
                 <i />
-                <button className="status-target-button" onClick={() => setChapterSettingsOpen(true)} aria-label="章节设置">{chapter.content.length.toLocaleString()} 字符</button>
+                <button
+                  className="status-target-button"
+                  onClick={() => setChapterSettingsOpen(true)}
+                  aria-label="章节设置"
+                >
+                  {chapter.content.length.toLocaleString()} 字符
+                </button>
               </footer>
               {!aiOpen ? (
-                <button className="chapter-ai-trigger" onClick={onToggleAi} aria-label="打开章节 AI 助手" title="打开章节 AI 助手" aria-haspopup="dialog" aria-expanded={aiOpen} aria-controls="chapter-ai-panel">
-                  <AiMark className="ai-launcher-mark" /><span>问 AI</span>
+                <button
+                  className="chapter-ai-trigger"
+                  onClick={onToggleAi}
+                  aria-label="打开章节 AI 助手"
+                  title="打开章节 AI 助手"
+                  aria-haspopup="dialog"
+                  aria-expanded={aiOpen}
+                  aria-controls="chapter-ai-panel"
+                >
+                  <AiMark className="ai-launcher-mark" />
+                  <span>问 AI</span>
                 </button>
               ) : null}
             </section>
@@ -1295,143 +3670,555 @@ function OutlineEditor({ project, providers, selectedChapterId, onSelectChapter,
           onClose={() => setChapterSettingsOpen(false)}
           onSave={(value) => {
             onUpdate((current) => {
-              const existingMemory = current.memories.find((item) => item.sourceChapterId === chapter.id)
-              const memoryContent = value.memory?.trim()
-              let memories = current.memories
+              const existingMemory = current.memories.find(
+                (item) => item.sourceChapterId === chapter.id,
+              );
+              const memoryContent = value.memory?.trim();
+              let memories = current.memories;
               if (memoryContent) {
                 const memory: MemoryItem = {
                   id: existingMemory?.id ?? uid(),
                   title: `${value.title} · 本章事实`,
                   content: memoryContent,
-                  category: 'chapter',
+                  category: "chapter",
                   pinned: true,
                   sourceChapterId: chapter.id,
                   updatedAt: now(),
-                }
+                };
                 memories = existingMemory
-                  ? current.memories.map((item) => item.id === existingMemory.id ? memory : item)
-                  : [memory, ...current.memories]
+                  ? current.memories.map((item) =>
+                      item.id === existingMemory.id ? memory : item,
+                    )
+                  : [memory, ...current.memories];
               }
               return {
                 ...current,
                 memories,
-                chapters: current.chapters.map((item) => item.id === chapter.id ? { ...item, ...value, updatedAt: now() } : item),
-              }
-            })
-            setChapterSettingsOpen(false)
-            onToast('章节设置已保存')
+                chapters: current.chapters.map((item) =>
+                  item.id === chapter.id
+                    ? { ...item, ...value, updatedAt: now() }
+                    : item,
+                ),
+              };
+            });
+            setChapterSettingsOpen(false);
+            onToast("章节设置已保存");
           }}
         />
       ) : null}
     </>
-  )
+  );
 }
 
-function ChapterSettingsDialog({ chapter, onClose, onSave }: { chapter: Chapter; onClose: () => void; onSave: (chapter: Chapter) => void }) {
-  const [draft, setDraft] = useState(chapter)
-  const targets = [1500, 2000, 2500, 3000, 4000]
+function defaultSupplementChapterIndexes(
+  chapters: Chapter[],
+  selectedChapterId: string | null,
+) {
+  if (!chapters.length) return [] as number[];
+  const selectedIndex = Math.max(
+    0,
+    chapters.findIndex((item) => item.id === selectedChapterId),
+  );
+  const picks = new Set<number>();
+  const prefer = [selectedIndex, selectedIndex - 1, selectedIndex + 1];
+  for (const index of prefer) {
+    if (index >= 0 && index < chapters.length) picks.add(index);
+    if (picks.size >= 3) break;
+  }
+  for (let index = 0; index < chapters.length && picks.size < 3; index += 1) {
+    picks.add(index);
+  }
+  return [...picks].sort((left, right) => left - right);
+}
+
+function SupplementLoreDialog({
+  project,
+  selectedChapterId,
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  project: NovelProject;
+  selectedChapterId: string | null;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (chapterIndexes: number[]) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState<number[]>(() =>
+    defaultSupplementChapterIndexes(project.chapters, selectedChapterId),
+  );
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return project.chapters
+      .map((chapter, index) => ({ chapter, index }))
+      .filter(({ chapter }) =>
+        keyword
+          ? `${chapter.title} ${chapter.summary}`
+              .toLowerCase()
+              .includes(keyword)
+          : true,
+      );
+  }, [project.chapters, query]);
+  const selectedWords = selected.reduce(
+    (sum, index) => sum + countWords(project.chapters[index]?.content ?? ""),
+    0,
+  );
+  const toggle = (index: number) => {
+    setSelected((current) => {
+      if (current.includes(index))
+        return current.filter((item) => item !== index);
+      if (current.length >= 3) return current;
+      return [...current, index].sort((left, right) => left - right);
+    });
+  };
+
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <form className="dialog chapter-settings-dialog" onSubmit={(event) => { event.preventDefault(); onSave(draft) }}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <div className="dialog supplement-lore-dialog" role="dialog" aria-modal="true">
         <div className="dialog-head">
-          <div><span className="dialog-icon"><SlidersHorizontal size={19} /></span><span><h2>章节设置</h2><p>独立控制本章篇幅、章纲和长期记忆</p></span></div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+          <div>
+            <span className="dialog-icon">
+              <ScanText size={19} />
+            </span>
+            <span>
+              <h2>三章补充设定</h2>
+              <p>选择最多 3 章正文解析，增量补充角色 / 世界观 / 情节 / 记忆 / 时间线</p>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="关闭"
+          >
+            <X size={19} />
+          </button>
+        </div>
+        <div className="dialog-body">
+          <p className="import-txt-warning warn">
+            不会覆盖已有设定：同名角色与设定条目会合并增强，新事实写入记忆。每章正文过长时会截取前段以控制
+            Token。
+          </p>
+          <label className="chapter-search">
+            <Search size={15} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索章节"
+              disabled={busy}
+            />
+          </label>
+          <div className="supplement-chapter-list" role="listbox" aria-multiselectable="true">
+            {filtered.map(({ chapter, index }) => {
+              const checked = selected.includes(index);
+              const words = countWords(chapter.content);
+              return (
+                <button
+                  key={chapter.id}
+                  type="button"
+                  role="option"
+                  aria-selected={checked}
+                  className={`supplement-chapter-row ${checked ? "selected" : ""}`}
+                  disabled={busy || (!checked && selected.length >= 3)}
+                  onClick={() => toggle(index)}
+                >
+                  <span className="supplement-chapter-check" aria-hidden="true">
+                    {checked ? <Check size={14} /> : null}
+                  </span>
+                  <span className="chapter-index">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <span className="chapter-info">
+                    <strong>{chapter.title}</strong>
+                    <small>
+                      {words.toLocaleString()} 字
+                      {chapter.content.trim() ? "" : " · 无正文"}
+                    </small>
+                  </span>
+                </button>
+              );
+            })}
+            {!filtered.length ? (
+              <p className="import-txt-empty">没有匹配的章节</p>
+            ) : null}
+          </div>
+          <small className="supplement-lore-meta">
+            已选 {selected.length}/3 章
+            {selected.length
+              ? ` · 约 ${selectedWords.toLocaleString()} 字`
+              : ""}
+          </small>
+        </div>
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || selected.length < 1}
+            onClick={() => void onSubmit(selected)}
+          >
+            {busy ? (
+              <LoaderCircle className="spin" size={17} />
+            ) : (
+              <Sparkles size={17} />
+            )}
+            {busy ? "正在解析补充…" : "解析并补充设定"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChapterSettingsDialog({
+  chapter,
+  onClose,
+  onSave,
+}: {
+  chapter: Chapter;
+  onClose: () => void;
+  onSave: (chapter: Chapter) => void;
+}) {
+  const [draft, setDraft] = useState(chapter);
+  const targets = [1500, 2000, 2500, 3000, 4000];
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <form
+        className="dialog chapter-settings-dialog"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(draft);
+        }}
+      >
+        <div className="dialog-head">
+          <div>
+            <span className="dialog-icon">
+              <SlidersHorizontal size={19} />
+            </span>
+            <span>
+              <h2>章节设置</h2>
+              <p>独立控制本章篇幅、章纲和长期记忆</p>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="关闭"
+          >
+            <X size={19} />
+          </button>
         </div>
         <div className="dialog-body">
           <div className="create-form-grid">
-            <Field label="章节标题"><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></Field>
-            <Field label="章节状态"><select value={draft.status} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value as Chapter['status'] }))}><option value="draft">草稿</option><option value="revising">修订中</option><option value="done">已完成</option></select></Field>
+            <Field label="章节标题">
+              <input
+                value={draft.title}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }))
+                }
+              />
+            </Field>
+            <Field label="章节状态">
+              <select
+                value={draft.status}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    status: event.target.value as Chapter["status"],
+                  }))
+                }
+              >
+                <option value="draft">草稿</option>
+                <option value="revising">修订中</option>
+                <option value="done">已完成</option>
+              </select>
+            </Field>
           </div>
           <Field label="目标字数">
             <div className="word-target-control">
-              <input type="number" min="500" max="10000" step="100" value={draft.targetWords} onChange={(event) => setDraft((current) => ({ ...current, targetWords: Math.min(10000, Math.max(500, Number(event.target.value) || 500)) }))} />
+              <input
+                type="number"
+                min="500"
+                max="10000"
+                step="100"
+                value={draft.targetWords}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    targetWords: Math.min(
+                      10000,
+                      Math.max(500, Number(event.target.value) || 500),
+                    ),
+                  }))
+                }
+              />
               <div className="word-target-presets">
-                {targets.map((target) => <button type="button" key={target} className={draft.targetWords === target ? 'active' : ''} onClick={() => setDraft((current) => ({ ...current, targetWords: target }))}>{target}</button>)}
+                {targets.map((target) => (
+                  <button
+                    type="button"
+                    key={target}
+                    className={draft.targetWords === target ? "active" : ""}
+                    onClick={() =>
+                      setDraft((current) => ({
+                        ...current,
+                        targetWords: target,
+                      }))
+                    }
+                  >
+                    {target}
+                  </button>
+                ))}
               </div>
             </div>
           </Field>
-          <Field label="本章章纲"><textarea value={draft.summary} onChange={(event) => setDraft((current) => ({ ...current, summary: event.target.value }))} rows={6} /></Field>
+          <Field label="本章章纲">
+            <textarea
+              value={draft.summary}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  summary: event.target.value,
+                }))
+              }
+              rows={6}
+            />
+          </Field>
           <Field label="本章需要记住的事实" hint="保存后会置顶进入书籍记忆库">
-            <textarea value={draft.memory ?? ''} onChange={(event) => setDraft((current) => ({ ...current, memory: event.target.value }))} rows={4} placeholder="例如：林安左臂伤口已经结痂；韩尧第一次得知污染源来自研究所。" />
+            <textarea
+              value={draft.memory ?? ""}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  memory: event.target.value,
+                }))
+              }
+              rows={4}
+              placeholder="例如：林安左臂伤口已经结痂；韩尧第一次得知污染源来自研究所。"
+            />
           </Field>
         </div>
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button"><Check size={16} />保存章节设置</button></div>
+        <div className="dialog-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary-button">
+            <Check size={16} />
+            保存章节设置
+          </button>
+        </div>
       </form>
     </div>
-  )
+  );
 }
 
-function GenerationBanner({ project, providers, onPause, onResume }: { project: NovelProject; providers: AppData['settings']['providers']; onPause: () => void; onResume: () => void }) {
-  const generation = project.generation
-  const done = project.chapters.filter((chapter) => chapter.generationStatus === 'done').length
-  const progress = generation ? Math.round((done / Math.max(1, generation.totalChapters)) * 100) : 0
-  const active = generation ? project.chapters[generation.currentChapterIndex] : undefined
-  const stage = active?.workflowStage ? workflowStageLabels[active.workflowStage] : '等待继续'
-  const modeLabel = generation?.qualityMode === 'fanqie' ? '番茄发布版' : generation?.qualityMode === 'standard' ? '标准成稿' : '快速初稿'
-  const provider = providers.find((item) => item.id === generation?.providerId)
-  const status = generation?.status ?? 'idle'
-  const statusLabel = status === 'generating'
-    ? `${stage} · 第 ${generation!.currentChapterIndex + 1} / ${generation!.totalChapters} 章`
-    : status === 'error'
-      ? '生成遇到问题'
-      : status === 'completed'
-        ? '全书初稿已生成'
-        : status === 'paused'
-          ? '草稿已保存'
-          : '草稿已保存'
+function GenerationBanner({
+  project,
+  providers,
+  onPause,
+  onResume,
+}: {
+  project: NovelProject;
+  providers: AppData["settings"]["providers"];
+  onPause: () => void;
+  onResume: () => void;
+}) {
+  const generation = project.generation;
+  const done = project.chapters.filter(
+    (chapter) => chapter.generationStatus === "done",
+  ).length;
+  const progress = generation
+    ? Math.round((done / Math.max(1, generation.totalChapters)) * 100)
+    : 0;
+  const active = generation
+    ? project.chapters[generation.currentChapterIndex]
+    : undefined;
+  const stage = active?.workflowStage
+    ? workflowStageLabels[active.workflowStage]
+    : "等待继续";
+  const modeLabel =
+    generation?.qualityMode === "standard" ? "标准成稿" : "快速初稿";
+  const provider = providers.find((item) => item.id === generation?.providerId);
+  const status = generation?.status ?? "idle";
+  const statusLabel =
+    status === "generating"
+      ? `${stage} · 第 ${generation!.currentChapterIndex + 1} / ${generation!.totalChapters} 章`
+      : status === "error"
+        ? "生成遇到问题"
+        : status === "completed"
+          ? "全书初稿已生成"
+          : status === "paused"
+            ? "草稿已保存"
+            : "草稿已保存";
 
   return (
-    <div className={`editor-status-row generation-banner ${status}`} aria-live="polite">
+    <div
+      className={`editor-status-row generation-banner ${status}`}
+      aria-live="polite"
+    >
       <div className="book-status">
-        <span className="generation-icon"><BookOpenText size={18} /></span>
-        <span><strong>{project.title}</strong><small>{statusLabel}</small></span>
+        <span className="generation-icon">
+          <BookOpenText size={18} />
+        </span>
+        <span>
+          <strong>{project.title}</strong>
+          <small>{statusLabel}</small>
+        </span>
       </div>
       <div className="generation-copy">
-        <div className="generation-progress"><span style={{ width: `${progress}%` }} /></div>
-        <small>{generation ? `${modeLabel} · ${provider ? `${provider.name} · ${provider.model}` : '模型未找到'}` : `${project.chapters.length} 章 · ${project.genre}`}{generation?.error ? ` · ${generation.error}` : ''}</small>
+        <div className="generation-progress">
+          <span style={{ width: `${progress}%` }} />
+        </div>
+        <small>
+          {generation
+            ? `${modeLabel} · ${provider ? `${provider.name} · ${provider.model}` : "模型未找到"}`
+            : `${project.chapters.length} 章 · ${project.genre}`}
+          {generation?.error ? ` · ${generation.error}` : ""}
+        </small>
       </div>
-      {status === 'generating' ? (
-        <button className="generation-action secondary-button compact" onClick={onPause}><Pause size={14} />暂停</button>
-      ) : status === 'paused' || status === 'error' ? (
-        <button className="generation-action primary-button compact" onClick={onResume}><Play size={14} />继续</button>
-      ) : status === 'completed' ? (
-        <span className="generation-finished"><Check size={15} />已完成</span>
+      {status === "generating" ? (
+        <button
+          className="generation-action secondary-button compact"
+          onClick={onPause}
+        >
+          <Pause size={14} />
+          暂停
+        </button>
+      ) : status === "paused" || status === "error" ? (
+        <button
+          className="generation-action primary-button compact"
+          onClick={onResume}
+        >
+          <Play size={14} />
+          继续
+        </button>
+      ) : status === "completed" ? (
+        <span className="generation-finished">
+          <Check size={15} />
+          已完成
+        </span>
       ) : null}
     </div>
-  )
+  );
 }
 
-function CharactersView({ project, onUpdate }: { project: NovelProject; onUpdate: (updater: (project: NovelProject) => NovelProject) => void }) {
-  const [selectedId, setSelectedId] = useState<string | null>(project.characters[0]?.id ?? null)
-  const [query, setQuery] = useState('')
-  const selected = project.characters.find((item) => item.id === selectedId) ?? null
-  const visible = project.characters.filter((item) => `${item.name}${item.role}${item.tags.join('')}`.toLowerCase().includes(query.toLowerCase()))
+function CharactersView({
+  project,
+  onUpdate,
+  onOpenToolkit,
+}: {
+  project: NovelProject;
+  onUpdate: (updater: (project: NovelProject) => NovelProject) => void;
+  onToast?: (message: string) => void;
+  onOpenToolkit?: () => void;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(
+    project.characters[0]?.id ?? null,
+  );
+  const [query, setQuery] = useState("");
+  const selected =
+    project.characters.find((item) => item.id === selectedId) ?? null;
+  const visible = project.characters.filter((item) =>
+    `${item.name}${item.role}${item.tags.join("")}`
+      .toLowerCase()
+      .includes(query.toLowerCase()),
+  );
 
   const addCharacter = () => {
     const character: Character = {
-      id: uid(), name: '新角色', role: '', description: '', motivation: '', conflict: '', tags: [], updatedAt: now(),
-    }
-    onUpdate((current) => ({ ...current, characters: [character, ...current.characters] }))
-    setSelectedId(character.id)
-  }
-  const patch = (value: Partial<Character>) => {
-    if (!selected) return
+      id: uid(),
+      name: "新角色",
+      role: "",
+      description: "",
+      motivation: "",
+      conflict: "",
+      tags: [],
+      updatedAt: now(),
+    };
     onUpdate((current) => ({
       ...current,
-      characters: current.characters.map((item) => item.id === selected.id ? { ...item, ...value, updatedAt: now() } : item),
-    }))
-  }
+      characters: [character, ...current.characters],
+    }));
+    setSelectedId(character.id);
+  };
+  const patch = (value: Partial<Character>) => {
+    if (!selected) return;
+    onUpdate((current) => ({
+      ...current,
+      characters: current.characters.map((item) =>
+        item.id === selected.id
+          ? { ...item, ...value, updatedAt: now() }
+          : item,
+      ),
+    }));
+  };
   const remove = () => {
-    if (!selected) return
+    if (!selected) return;
     onUpdate((current) => ({
       ...current,
       characters: current.characters.filter((item) => item.id !== selected.id),
-      trash: [{ id: uid(), kind: 'character', title: selected.name, deletedAt: now(), payload: selected }, ...current.trash],
-    }))
-    setSelectedId(project.characters.find((item) => item.id !== selected.id)?.id ?? null)
-  }
+      trash: [
+        {
+          id: uid(),
+          kind: "character",
+          title: selected.name,
+          deletedAt: now(),
+          payload: selected,
+        },
+        ...current.trash,
+      ],
+    }));
+    setSelectedId(
+      project.characters.find((item) => item.id !== selected.id)?.id ?? null,
+    );
+  };
 
   return (
+    <div className="memory-layout">
+      {!project.characters.length &&
+      (project.origin === "imported" || project.origin === "sequel") ? (
+        <div className="seasoning-guide">
+          <strong>导入书还没有角色卡</strong>
+          <p>
+            建议先用「作品工具 → AI 提炼设定 / 三章补充设定」，再继续写作或加料。
+          </p>
+          {onOpenToolkit ? (
+            <div className="seasoning-guide-actions">
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={onOpenToolkit}
+              >
+                打开作品工具
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     <LibraryLayout
       title="角色"
       description={`${project.characters.length} 位角色`}
@@ -1439,58 +4226,159 @@ function CharactersView({ project, onUpdate }: { project: NovelProject; onUpdate
       onQuery={setQuery}
       addLabel="新建角色"
       onAdd={addCharacter}
-      list={visible.length ? visible.map((character) => (
-        <button key={character.id} className={`library-row ${selectedId === character.id ? 'active' : ''}`} onClick={() => setSelectedId(character.id)}>
-          <span className="avatar"><UserRound size={20} /></span>
-          <span><strong>{character.name}</strong><small>{character.role || '未设置角色定位'}</small></span>
-        </button>
-      )) : <LibraryEmpty icon={<UsersRound size={40} />} text="还没有角色" onAdd={addCharacter} />}
-      editor={selected ? (
-        <RecordEditor title="角色档案" onDelete={remove}>
-          <Field label="姓名"><input value={selected.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
-          <Field label="角色定位"><input value={selected.role} onChange={(event) => patch({ role: event.target.value })} placeholder="主角、对手、导师……" /></Field>
-          <Field label="人物小传"><textarea value={selected.description} onChange={(event) => patch({ description: event.target.value })} rows={5} placeholder="经历、性格与外在特征" /></Field>
-          <Field label="核心欲望"><textarea value={selected.motivation} onChange={(event) => patch({ motivation: event.target.value })} rows={3} placeholder="他/她最想得到什么？" /></Field>
-          <Field label="内外冲突"><textarea value={selected.conflict} onChange={(event) => patch({ conflict: event.target.value })} rows={3} placeholder="什么阻挡了这个角色？" /></Field>
-          <Field label="标签"><input value={selected.tags.join('，')} onChange={(event) => patch({ tags: event.target.value.split(/[，,]/).map((tag) => tag.trim()).filter(Boolean) })} placeholder="冷静，秘密身份，成长型" /></Field>
-        </RecordEditor>
-      ) : null}
+      list={
+        visible.length ? (
+          visible.map((character) => (
+            <button
+              key={character.id}
+              className={`library-row ${selectedId === character.id ? "active" : ""}`}
+              onClick={() => setSelectedId(character.id)}
+            >
+              <span className="avatar">
+                <UserRound size={20} />
+              </span>
+              <span>
+                <strong>{character.name}</strong>
+                <small>{character.role || "未设置角色定位"}</small>
+              </span>
+            </button>
+          ))
+        ) : (
+          <LibraryEmpty
+            icon={<UsersRound size={40} />}
+            text="还没有角色"
+            onAdd={addCharacter}
+          />
+        )
+      }
+      editor={
+        selected ? (
+          <RecordEditor title="角色档案" onDelete={remove}>
+            <Field label="姓名">
+              <input
+                value={selected.name}
+                onChange={(event) => patch({ name: event.target.value })}
+              />
+            </Field>
+            <Field label="角色定位">
+              <input
+                value={selected.role}
+                onChange={(event) => patch({ role: event.target.value })}
+                placeholder="主角、对手、导师……"
+              />
+            </Field>
+            <Field label="人物小传">
+              <textarea
+                value={selected.description}
+                onChange={(event) => patch({ description: event.target.value })}
+                rows={5}
+                placeholder="经历、性格与外在特征"
+              />
+            </Field>
+            <Field label="核心欲望">
+              <textarea
+                value={selected.motivation}
+                onChange={(event) => patch({ motivation: event.target.value })}
+                rows={3}
+                placeholder="他/她最想得到什么？"
+              />
+            </Field>
+            <Field label="内外冲突">
+              <textarea
+                value={selected.conflict}
+                onChange={(event) => patch({ conflict: event.target.value })}
+                rows={3}
+                placeholder="什么阻挡了这个角色？"
+              />
+            </Field>
+            <Field label="标签">
+              <input
+                value={selected.tags.join("，")}
+                onChange={(event) =>
+                  patch({
+                    tags: event.target.value
+                      .split(/[，,]/)
+                      .map((tag) => tag.trim())
+                      .filter(Boolean),
+                  })
+                }
+                placeholder="冷静，秘密身份，成长型"
+              />
+            </Field>
+          </RecordEditor>
+        ) : null
+      }
     />
-  )
+    </div>
+  );
 }
 
-type NoteKind = 'world' | 'plot' | 'ideas'
+type NoteKind = "world" | "plot" | "ideas";
 
-function NotesView({ kind, project, onUpdate }: { kind: NoteKind; project: NovelProject; onUpdate: (updater: (project: NovelProject) => NovelProject) => void }) {
-  const key = kind === 'world' ? 'worldNotes' : kind === 'plot' ? 'plotNotes' : 'ideas'
-  const notes = project[key]
-  const config = noteConfig[kind]
-  const [selectedId, setSelectedId] = useState<string | null>(notes[0]?.id ?? null)
-  const [query, setQuery] = useState('')
-  const selected = notes.find((item) => item.id === selectedId) ?? null
-  const visible = notes.filter((item) => `${item.title}${item.content}${item.category}`.toLowerCase().includes(query.toLowerCase()))
+function NotesView({
+  kind,
+  project,
+  onUpdate,
+}: {
+  kind: NoteKind;
+  project: NovelProject;
+  onUpdate: (updater: (project: NovelProject) => NovelProject) => void;
+}) {
+  const key =
+    kind === "world" ? "worldNotes" : kind === "plot" ? "plotNotes" : "ideas";
+  const notes = project[key];
+  const config = noteConfig[kind];
+  const [selectedId, setSelectedId] = useState<string | null>(
+    notes[0]?.id ?? null,
+  );
+  const [query, setQuery] = useState("");
+  const selected = notes.find((item) => item.id === selectedId) ?? null;
+  const visible = notes.filter((item) =>
+    `${item.title}${item.content}${item.category}`
+      .toLowerCase()
+      .includes(query.toLowerCase()),
+  );
 
   const add = () => {
-    const note: NoteItem = { id: uid(), title: config.add, content: '', category: config.categories[0], updatedAt: now() }
-    onUpdate((current) => ({ ...current, [key]: [note, ...current[key]] }))
-    setSelectedId(note.id)
-  }
+    const note: NoteItem = {
+      id: uid(),
+      title: config.add,
+      content: "",
+      category: config.categories[0],
+      updatedAt: now(),
+    };
+    onUpdate((current) => ({ ...current, [key]: [note, ...current[key]] }));
+    setSelectedId(note.id);
+  };
   const patch = (value: Partial<NoteItem>) => {
-    if (!selected) return
+    if (!selected) return;
     onUpdate((current) => ({
       ...current,
-      [key]: current[key].map((item) => item.id === selected.id ? { ...item, ...value, updatedAt: now() } : item),
-    }))
-  }
+      [key]: current[key].map((item) =>
+        item.id === selected.id
+          ? { ...item, ...value, updatedAt: now() }
+          : item,
+      ),
+    }));
+  };
   const remove = () => {
-    if (!selected) return
+    if (!selected) return;
     onUpdate((current) => ({
       ...current,
       [key]: current[key].filter((item) => item.id !== selected.id),
-      trash: [{ id: uid(), kind: kind === 'ideas' ? 'idea' : kind, title: selected.title, deletedAt: now(), payload: selected }, ...current.trash],
-    }))
-    setSelectedId(notes.find((item) => item.id !== selected.id)?.id ?? null)
-  }
+      trash: [
+        {
+          id: uid(),
+          kind: kind === "ideas" ? "idea" : kind,
+          title: selected.title,
+          deletedAt: now(),
+          payload: selected,
+        },
+        ...current.trash,
+      ],
+    }));
+    setSelectedId(notes.find((item) => item.id !== selected.id)?.id ?? null);
+  };
 
   return (
     <LibraryLayout
@@ -1500,102 +4388,284 @@ function NotesView({ kind, project, onUpdate }: { kind: NoteKind; project: Novel
       onQuery={setQuery}
       addLabel={config.add}
       onAdd={add}
-      list={visible.length ? visible.map((item) => (
-        <button key={item.id} className={`library-row ${selectedId === item.id ? 'active' : ''}`} onClick={() => setSelectedId(item.id)}>
-          <span className="note-glyph"><FileText size={18} /></span>
-          <span><strong>{item.title}</strong><small>{item.category}</small></span>
-        </button>
-      )) : <LibraryEmpty icon={<FileText size={40} />} text={config.empty} onAdd={add} />}
-      editor={selected ? (
-        <RecordEditor title={config.title} onDelete={remove}>
-          <Field label="标题"><input value={selected.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
-          <Field label="分类">
-            <select value={selected.category} onChange={(event) => patch({ category: event.target.value })}>
-              {config.categories.map((category) => <option key={category}>{category}</option>)}
-            </select>
-          </Field>
-          <Field label="内容"><textarea className="large-textarea" value={selected.content} onChange={(event) => patch({ content: event.target.value })} placeholder="写下具体内容……" /></Field>
-        </RecordEditor>
-      ) : null}
+      list={
+        visible.length ? (
+          visible.map((item) => (
+            <button
+              key={item.id}
+              className={`library-row ${selectedId === item.id ? "active" : ""}`}
+              onClick={() => setSelectedId(item.id)}
+            >
+              <span className="note-glyph">
+                <FileText size={18} />
+              </span>
+              <span>
+                <strong>{item.title}</strong>
+                <small>{item.category}</small>
+              </span>
+            </button>
+          ))
+        ) : (
+          <LibraryEmpty
+            icon={<FileText size={40} />}
+            text={config.empty}
+            onAdd={add}
+          />
+        )
+      }
+      editor={
+        selected ? (
+          <RecordEditor title={config.title} onDelete={remove}>
+            <Field label="标题">
+              <input
+                value={selected.title}
+                onChange={(event) => patch({ title: event.target.value })}
+              />
+            </Field>
+            <Field label="分类">
+              <select
+                value={selected.category}
+                onChange={(event) => patch({ category: event.target.value })}
+              >
+                {config.categories.map((category) => (
+                  <option key={category}>{category}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="内容">
+              <textarea
+                className="large-textarea"
+                value={selected.content}
+                onChange={(event) => patch({ content: event.target.value })}
+                placeholder="写下具体内容……"
+              />
+            </Field>
+          </RecordEditor>
+        ) : null
+      }
     />
-  )
+  );
 }
 
-function MemoryView({ project, onUpdate }: { project: NovelProject; onUpdate: (updater: (project: NovelProject) => NovelProject) => void }) {
-  const [selectedId, setSelectedId] = useState<string | null>(project.memories[0]?.id ?? null)
-  const [query, setQuery] = useState('')
-  const selected = project.memories.find((item) => item.id === selectedId) ?? null
+function MemoryView({
+  project,
+  onUpdate,
+}: {
+  project: NovelProject;
+  onUpdate: (updater: (project: NovelProject) => NovelProject) => void;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(
+    project.memories[0]?.id ?? null,
+  );
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<
+    "all" | MemoryCategory
+  >("all");
+  const [characterFilter, setCharacterFilter] = useState("all");
+  const selected =
+    project.memories.find((item) => item.id === selectedId) ?? null;
   const visible = useMemo(() => {
-    const keyword = query.trim().toLowerCase()
+    const keyword = query.trim().toLowerCase();
     return [...project.memories]
-      .filter((item) => !keyword || `${item.title}${item.content}${memoryCategoryLabels[item.category]}`.toLowerCase().includes(keyword))
-      .sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt)
-  }, [project.memories, query])
+      .filter((item) => {
+        if (categoryFilter !== "all" && item.category !== categoryFilter)
+          return false;
+        if (characterFilter !== "all") {
+          const haystack = `${item.title}\n${item.content}`;
+          if (!haystack.includes(characterFilter)) return false;
+        }
+        if (!keyword) return true;
+        return `${item.title}${item.content}${memoryCategoryLabels[item.category]}`
+          .toLowerCase()
+          .includes(keyword);
+      })
+      .sort(
+        (left, right) =>
+          Number(right.pinned) - Number(left.pinned) ||
+          right.updatedAt - left.updatedAt,
+      );
+  }, [project.memories, query, categoryFilter, characterFilter]);
 
   const add = () => {
     const memory: MemoryItem = {
-      id: uid(), title: '新记忆', content: '', category: 'canon', pinned: true, updatedAt: now(),
-    }
-    onUpdate((current) => ({ ...current, memories: [memory, ...current.memories] }))
-    setSelectedId(memory.id)
-  }
-  const patch = (value: Partial<MemoryItem>) => {
-    if (!selected) return
+      id: uid(),
+      title: "新记忆",
+      content: "",
+      category: "canon",
+      pinned: true,
+      updatedAt: now(),
+    };
     onUpdate((current) => ({
       ...current,
-      memories: current.memories.map((item) => item.id === selected.id ? { ...item, ...value, updatedAt: now() } : item),
-    }))
-  }
+      memories: [memory, ...current.memories],
+    }));
+    setSelectedId(memory.id);
+  };
+  const patch = (value: Partial<MemoryItem>) => {
+    if (!selected) return;
+    onUpdate((current) => ({
+      ...current,
+      memories: current.memories.map((item) =>
+        item.id === selected.id
+          ? { ...item, ...value, updatedAt: now() }
+          : item,
+      ),
+    }));
+  };
   const remove = () => {
-    if (!selected) return
+    if (!selected) return;
     onUpdate((current) => ({
       ...current,
       memories: current.memories.filter((item) => item.id !== selected.id),
-      trash: [{ id: uid(), kind: 'memory', title: selected.title, deletedAt: now(), payload: selected }, ...current.trash],
-    }))
-    setSelectedId(project.memories.find((item) => item.id !== selected.id)?.id ?? null)
-  }
+      trash: [
+        {
+          id: uid(),
+          kind: "memory",
+          title: selected.title,
+          deletedAt: now(),
+          payload: selected,
+        },
+        ...current.trash,
+      ],
+    }));
+    setSelectedId(
+      project.memories.find((item) => item.id !== selected.id)?.id ?? null,
+    );
+  };
 
   return (
+    <div className="memory-layout">
+      <div className="memory-filters" role="toolbar" aria-label="记忆筛选">
+        <button
+          type="button"
+          className={`memory-filter-chip ${categoryFilter === "all" ? "active" : ""}`}
+          onClick={() => setCategoryFilter("all")}
+        >
+          全部
+        </button>
+        {(Object.keys(memoryCategoryLabels) as MemoryCategory[]).map(
+          (category) => (
+            <button
+              key={category}
+              type="button"
+              className={`memory-filter-chip ${categoryFilter === category ? "active" : ""}`}
+              onClick={() => setCategoryFilter(category)}
+            >
+              {memoryCategoryLabels[category]}
+            </button>
+          ),
+        )}
+        <label className="memory-character-filter">
+          <span>角色</span>
+          <select
+            value={characterFilter}
+            onChange={(event) => setCharacterFilter(event.target.value)}
+          >
+            <option value="all">全部角色</option>
+            {project.characters.map((character) => (
+              <option key={character.id} value={character.name}>
+                {character.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
     <LibraryLayout
       title="记忆库"
-      description={`${project.memories.length} 条记忆 · ${project.memories.filter((item) => item.pinned).length} 条置顶`}
+      description={`${visible.length} / ${project.memories.length} 条 · ${project.memories.filter((item) => item.pinned).length} 条置顶`}
       query={query}
       onQuery={setQuery}
       addLabel="添加记忆"
       onAdd={add}
-      list={visible.length ? visible.map((memory) => (
-        <button key={memory.id} className={`library-row memory-row ${selectedId === memory.id ? 'active' : ''}`} onClick={() => setSelectedId(memory.id)}>
-          <span className="memory-glyph"><BookMarked size={18} /></span>
-          <span><strong>{memory.title}</strong><small>{memoryCategoryLabels[memory.category]}</small></span>
-          {memory.pinned ? <Pin className="memory-pin" size={13} /> : null}
-        </button>
-      )) : <LibraryEmpty icon={<BookMarked size={40} />} text="还没有长期记忆" onAdd={add} />}
-      editor={selected ? (
-        <RecordEditor title="长期记忆" onDelete={remove}>
-          <Field label="标题"><input value={selected.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
-          <Field label="类型">
-            <select value={selected.category} onChange={(event) => patch({ category: event.target.value as MemoryCategory })}>
-              {Object.entries(memoryCategoryLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </Field>
-          <Field label="记忆内容"><textarea className="large-textarea" value={selected.content} onChange={(event) => patch({ content: event.target.value })} placeholder="AI 在后续规划、写作和审稿时会参考这条信息。" /></Field>
-          <label className="toggle-row"><span><strong>优先记忆</strong><small>置顶后优先进入 AI 上下文，自动章节更新不会覆盖</small></span><input type="checkbox" checked={selected.pinned} onChange={(event) => patch({ pinned: event.target.checked })} /></label>
-        </RecordEditor>
-      ) : null}
+      list={
+        visible.length ? (
+          visible.map((memory) => (
+            <button
+              key={memory.id}
+              className={`library-row memory-row ${selectedId === memory.id ? "active" : ""}`}
+              onClick={() => setSelectedId(memory.id)}
+            >
+              <span className="memory-glyph">
+                <BookMarked size={18} />
+              </span>
+              <span>
+                <strong>{memory.title}</strong>
+                <small>{memoryCategoryLabels[memory.category]}</small>
+              </span>
+              {memory.pinned ? <Pin className="memory-pin" size={13} /> : null}
+            </button>
+          ))
+        ) : (
+          <LibraryEmpty
+            icon={<BookMarked size={40} />}
+            text={
+              categoryFilter === "all" && characterFilter === "all"
+                ? "还没有长期记忆"
+                : "当前筛选下没有记忆"
+            }
+            onAdd={add}
+          />
+        )
+      }
+      editor={
+        selected ? (
+          <RecordEditor title="长期记忆" onDelete={remove}>
+            <Field label="标题">
+              <input
+                value={selected.title}
+                onChange={(event) => patch({ title: event.target.value })}
+              />
+            </Field>
+            <Field label="类型">
+              <select
+                value={selected.category}
+                onChange={(event) =>
+                  patch({ category: event.target.value as MemoryCategory })
+                }
+              >
+                {Object.entries(memoryCategoryLabels).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="记忆内容">
+              <textarea
+                className="large-textarea"
+                value={selected.content}
+                onChange={(event) => patch({ content: event.target.value })}
+                placeholder="AI 在后续规划、写作和审稿时会参考这条信息。"
+              />
+            </Field>
+            <label className="toggle-row">
+              <span>
+                <strong>优先记忆</strong>
+                <small>置顶后优先进入 AI 上下文，自动章节更新不会覆盖</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={selected.pinned}
+                onChange={(event) => patch({ pinned: event.target.checked })}
+              />
+            </label>
+          </RecordEditor>
+        ) : null
+      }
     />
-  )
+    </div>
+  );
 }
 
 interface LibraryLayoutProps {
-  title: string
-  description: string
-  query: string
-  onQuery: (value: string) => void
-  addLabel: string
-  onAdd: () => void
-  list: ReactNode
-  editor: ReactNode
+  title: string;
+  description: string;
+  query: string;
+  onQuery: (value: string) => void;
+  addLabel: string;
+  onAdd: () => void;
+  list: ReactNode;
+  editor: ReactNode;
 }
 
 function LibraryLayout(props: LibraryLayoutProps) {
@@ -1603,481 +4673,1457 @@ function LibraryLayout(props: LibraryLayoutProps) {
     <div className="library-layout">
       <section className="library-index">
         <div className="section-heading">
-          <div><h1>{props.title}</h1><p>{props.description}</p></div>
-          <button className="primary-button compact" onClick={props.onAdd}><Plus size={17} />{props.addLabel}</button>
+          <div>
+            <h1>{props.title}</h1>
+            <p>{props.description}</p>
+          </div>
+          <button className="primary-button compact" onClick={props.onAdd}>
+            <Plus size={17} />
+            {props.addLabel}
+          </button>
         </div>
-        <label className="library-search"><Search size={16} /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder={`搜索${props.title}`} /></label>
+        <label className="library-search">
+          <Search size={16} />
+          <input
+            value={props.query}
+            onChange={(event) => props.onQuery(event.target.value)}
+            placeholder={`搜索${props.title}`}
+          />
+        </label>
         <div className="library-list">{props.list}</div>
       </section>
-      <section className="record-pane">{props.editor ?? <div className="select-hint">选择一条记录进行编辑</div>}</section>
+      <section className="record-pane">
+        {props.editor ?? (
+          <div className="select-hint">选择一条记录进行编辑</div>
+        )}
+      </section>
     </div>
-  )
+  );
 }
 
-function LibraryEmpty({ icon, text, onAdd }: { icon: ReactNode; text: string; onAdd: () => void }) {
-  return <div className="library-empty"><span>{icon}</span><p>{text}</p><button className="text-button" onClick={onAdd}><Plus size={16} />立即创建</button></div>
+function LibraryEmpty({
+  icon,
+  text,
+  onAdd,
+}: {
+  icon: ReactNode;
+  text: string;
+  onAdd: () => void;
+}) {
+  return (
+    <div className="library-empty">
+      <span>{icon}</span>
+      <p>{text}</p>
+      <button className="text-button" onClick={onAdd}>
+        <Plus size={16} />
+        立即创建
+      </button>
+    </div>
+  );
 }
 
-function RecordEditor({ title, onDelete, children }: { title: string; onDelete: () => void; children: ReactNode }) {
+function RecordEditor({
+  title,
+  onDelete,
+  children,
+}: {
+  title: string;
+  onDelete: () => void;
+  children: ReactNode;
+}) {
   return (
     <div className="record-editor">
-      <div className="record-editor-head"><strong>{title}</strong><button className="icon-button danger-hover" onClick={onDelete} aria-label="移到回收站"><Trash2 size={18} /></button></div>
+      <div className="record-editor-head">
+        <strong>{title}</strong>
+        <button
+          className="icon-button danger-hover"
+          onClick={onDelete}
+          aria-label="移到回收站"
+        >
+          <Trash2 size={18} />
+        </button>
+      </div>
       <div className="record-fields">{children}</div>
     </div>
-  )
+  );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return <label className="field"><span>{label}{hint ? <small>{hint}</small> : null}</span>{children}</label>
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="field">
+      <span>
+        {label}
+        {hint ? <small>{hint}</small> : null}
+      </span>
+      {children}
+    </label>
+  );
 }
 
-function TrashView({ project, onUpdate }: { project: NovelProject; onUpdate: (updater: (project: NovelProject) => NovelProject) => void }) {
+function TrashView({
+  project,
+  onUpdate,
+}: {
+  project: NovelProject;
+  onUpdate: (updater: (project: NovelProject) => NovelProject) => void;
+}) {
   const restore = (trash: TrashItem) => {
     onUpdate((current) => {
-      const base = { ...current, trash: current.trash.filter((item) => item.id !== trash.id) }
-      if (trash.kind === 'chapter') return { ...base, chapters: [...current.chapters, trash.payload as Chapter] }
-      if (trash.kind === 'character') return { ...base, characters: [...current.characters, trash.payload as Character] }
-      if (trash.kind === 'world') return { ...base, worldNotes: [...current.worldNotes, trash.payload as NoteItem] }
-      if (trash.kind === 'plot') return { ...base, plotNotes: [...current.plotNotes, trash.payload as NoteItem] }
-      if (trash.kind === 'idea') return { ...base, ideas: [...current.ideas, trash.payload as NoteItem] }
-      if (trash.kind === 'memory') return { ...base, memories: [...current.memories, trash.payload as MemoryItem] }
-      return base
-    })
-  }
+      const base = {
+        ...current,
+        trash: current.trash.filter((item) => item.id !== trash.id),
+      };
+      if (trash.kind === "chapter")
+        return {
+          ...base,
+          chapters: [...current.chapters, trash.payload as Chapter],
+        };
+      if (trash.kind === "character")
+        return {
+          ...base,
+          characters: [...current.characters, trash.payload as Character],
+        };
+      if (trash.kind === "world")
+        return {
+          ...base,
+          worldNotes: [...current.worldNotes, trash.payload as NoteItem],
+        };
+      if (trash.kind === "plot")
+        return {
+          ...base,
+          plotNotes: [...current.plotNotes, trash.payload as NoteItem],
+        };
+      if (trash.kind === "idea")
+        return {
+          ...base,
+          ideas: [...current.ideas, trash.payload as NoteItem],
+        };
+      if (trash.kind === "memory")
+        return {
+          ...base,
+          memories: [...current.memories, trash.payload as MemoryItem],
+        };
+      if (trash.kind === "seasoningScene")
+        return {
+          ...base,
+          seasoningScenes: [
+            ...(current.seasoningScenes ?? []),
+            trash.payload as NoteItem,
+          ],
+        };
+      if (trash.kind === "seasoningSignal")
+        return {
+          ...base,
+          seasoningSignals: [
+            ...(current.seasoningSignals ?? []),
+            trash.payload as NoteItem,
+          ],
+        };
+      if (trash.kind === "seasoningRule")
+        return {
+          ...base,
+          seasoningRules: [
+            ...(current.seasoningRules ?? []),
+            trash.payload as NoteItem,
+          ],
+        };
+      return base;
+    });
+  };
 
   return (
     <div className="page-scroll narrow-page">
-      <div className="section-heading page-heading"><div><h1>回收站</h1><p>删除的内容保留在当前小说中</p></div>
-        {project.trash.length ? <button className="secondary-button danger" onClick={() => onUpdate((current) => ({ ...current, trash: [] }))}><Trash2 size={16} />清空回收站</button> : null}
+      <div className="section-heading page-heading">
+        <div>
+          <h1>回收站</h1>
+          <p>删除的内容保留在当前小说中</p>
+        </div>
+        {project.trash.length ? (
+          <button
+            className="secondary-button danger"
+            onClick={() => onUpdate((current) => ({ ...current, trash: [] }))}
+          >
+            <Trash2 size={16} />
+            清空回收站
+          </button>
+        ) : null}
       </div>
       {project.trash.length ? (
         <div className="trash-list">
           {project.trash.map((item) => (
             <div className="trash-row" key={item.id}>
-              <span className="trash-icon"><Trash2 size={18} /></span>
-              <span className="trash-info"><strong>{item.title}</strong><small>{trashKindLabel(item.kind)} · {new Date(item.deletedAt).toLocaleString('zh-CN')}</small></span>
-              <button className="secondary-button compact" onClick={() => restore(item)}><ArchiveRestore size={16} />恢复</button>
-              <button className="icon-button danger-hover" onClick={() => onUpdate((current) => ({ ...current, trash: current.trash.filter((trash) => trash.id !== item.id) }))} aria-label="永久删除"><X size={17} /></button>
+              <span className="trash-icon">
+                <Trash2 size={18} />
+              </span>
+              <span className="trash-info">
+                <strong>{item.title}</strong>
+                <small>
+                  {trashKindLabel(item.kind)} ·{" "}
+                  {new Date(item.deletedAt).toLocaleString("zh-CN")}
+                </small>
+              </span>
+              <button
+                className="secondary-button compact"
+                onClick={() => restore(item)}
+              >
+                <ArchiveRestore size={16} />
+                恢复
+              </button>
+              <button
+                className="icon-button danger-hover"
+                onClick={() =>
+                  onUpdate((current) => ({
+                    ...current,
+                    trash: current.trash.filter(
+                      (trash) => trash.id !== item.id,
+                    ),
+                  }))
+                }
+                aria-label="永久删除"
+              >
+                <X size={17} />
+              </button>
             </div>
           ))}
         </div>
-      ) : <div className="standalone-empty"><Trash2 size={42} /><h2>回收站是空的</h2><p>移除的章节和资料会暂存在这里。</p></div>}
+      ) : (
+        <div className="standalone-empty">
+          <Trash2 size={42} />
+          <h2>回收站是空的</h2>
+          <p>移除的章节和资料会暂存在这里。</p>
+        </div>
+      )}
     </div>
-  )
+  );
 }
 
-const trashKindLabel = (kind: TrashItem['kind']) => ({
-  chapter: '章节', character: '角色', world: '世界观', plot: '情节', idea: '灵感', memory: '记忆', project: '小说',
-}[kind])
+const trashKindLabel = (kind: TrashItem["kind"]) =>
+  ({
+    chapter: "章节",
+    character: "角色",
+    world: "世界观",
+    plot: "情节",
+    idea: "灵感",
+    memory: "记忆",
+    seasoningScene: "加料·场景",
+    seasoningSignal: "加料·识别点",
+    seasoningRule: "加料·规范",
+    project: "小说",
+  })[kind];
 
 interface SettingsViewProps {
-  data: AppData
-  activeProject: NovelProject | null
-  onToast: (message: string) => void
-  onChange: (data: AppData | ((data: AppData) => AppData)) => void
-  onImport: (event: ChangeEvent<HTMLInputElement>) => void
-  onDeleteProject: (project: NovelProject) => void
-  onRestoreProject: () => void
+  data: AppData;
+  activeProject: NovelProject | null;
+  onToast: (message: string) => void;
+  onChange: (data: AppData | ((data: AppData) => AppData)) => void;
+  onImport: (event: ChangeEvent<HTMLInputElement>) => void;
+  onDeleteProject: (project: NovelProject) => void;
+  onRestoreProject: () => void;
 }
 
-function SettingsView({ data, activeProject, onToast, onChange, onImport, onDeleteProject, onRestoreProject }: SettingsViewProps) {
-  const patchSettings = (value: Partial<AppData['settings']>) => onChange((current) => ({ ...current, settings: { ...current.settings, ...value } }))
-  const [draftProviderId, setDraftProviderId] = useState(data.settings.activeProviderId)
-  const [draftProviders, setDraftProviders] = useState(() => data.settings.providers.map((provider) => ({ ...provider })))
-  const [showApiKey, setShowApiKey] = useState(false)
+function SettingsView({
+  data,
+  activeProject,
+  onToast,
+  onChange,
+  onImport,
+  onDeleteProject,
+  onRestoreProject,
+}: SettingsViewProps) {
+  const patchSettings = (value: Partial<AppData["settings"]>) =>
+    onChange((current) => ({
+      ...current,
+      settings: { ...current.settings, ...value },
+    }));
+  const [draftProviderId, setDraftProviderId] = useState(
+    data.settings.activeProviderId,
+  );
+  const [draftProviders, setDraftProviders] = useState(() =>
+    data.settings.providers.map((provider) => ({ ...provider })),
+  );
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [breakArmorOpen, setBreakArmorOpen] = useState(false);
+  const [probeBusy, setProbeBusy] = useState<"idle" | "testing" | "listing">(
+    "idle",
+  );
+  const [probeMessage, setProbeMessage] = useState("");
+  const [probeError, setProbeError] = useState("");
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const probeAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const nextProviderId = data.settings.providers.some((provider) => provider.id === data.settings.activeProviderId)
+    const nextProviderId = data.settings.providers.some(
+      (provider) => provider.id === data.settings.activeProviderId,
+    )
       ? data.settings.activeProviderId
-      : data.settings.providers[0]?.id ?? ''
-    setDraftProviderId(nextProviderId)
-    setDraftProviders(data.settings.providers.map((provider) => ({ ...provider })))
-  }, [data.settings.activeProviderId, data.settings.providers])
+      : (data.settings.providers[0]?.id ?? "");
+    setDraftProviderId(nextProviderId);
+    setDraftProviders(
+      data.settings.providers.map((provider) => ({ ...provider })),
+    );
+  }, [data.settings.activeProviderId, data.settings.providers]);
 
-  useEffect(() => { setShowApiKey(false) }, [draftProviderId])
+  useEffect(() => {
+    setShowApiKey(false);
+    setBreakArmorOpen(false);
+    setProbeMessage("");
+    setProbeError("");
+    setAvailableModels([]);
+    setProbeBusy("idle");
+    probeAbortRef.current?.abort();
+    probeAbortRef.current = null;
+  }, [draftProviderId]);
 
-  const draftProvider = draftProviders.find((provider) => provider.id === draftProviderId) ?? draftProviders[0]
-  const currentProvider = data.settings.providers.find((provider) => provider.id === data.settings.activeProviderId) ?? data.settings.providers[0]
-  const modelSettingsDirty = draftProviderId !== data.settings.activeProviderId
-    || JSON.stringify(draftProviders) !== JSON.stringify(data.settings.providers)
-  const modelSettingsValid = Boolean(draftProvider?.baseUrl.trim() && draftProvider.model.trim())
+  useEffect(
+    () => () => {
+      probeAbortRef.current?.abort();
+    },
+    [],
+  );
 
-  const patchDraftProvider = (id: string, value: Partial<AppData['settings']['providers'][number]>) => {
-    setDraftProviders((providers) => providers.map((provider) => provider.id === id ? { ...provider, ...value } : provider))
-  }
+  const draftProvider =
+    draftProviders.find((provider) => provider.id === draftProviderId) ??
+    draftProviders[0];
+  const currentProvider =
+    data.settings.providers.find(
+      (provider) => provider.id === data.settings.activeProviderId,
+    ) ?? data.settings.providers[0];
+  const modelSettingsDirty =
+    draftProviderId !== data.settings.activeProviderId ||
+    JSON.stringify(draftProviders) !== JSON.stringify(data.settings.providers);
+  const modelSettingsValid = Boolean(
+    draftProvider?.baseUrl.trim() && draftProvider.model.trim(),
+  );
+  const canProbe =
+    Boolean(draftProvider?.baseUrl.trim() && draftProvider.apiKey.trim()) &&
+    probeBusy === "idle";
+
+  const patchDraftProvider = (
+    id: string,
+    value: Partial<AppData["settings"]["providers"][number]>,
+  ) => {
+    setDraftProviders((providers) =>
+      providers.map((provider) =>
+        provider.id === id ? { ...provider, ...value } : provider,
+      ),
+    );
+  };
 
   const resetModelSettings = () => {
-    setDraftProviderId(data.settings.activeProviderId)
-    setDraftProviders(data.settings.providers.map((provider) => ({ ...provider })))
-    setShowApiKey(false)
-  }
+    setDraftProviderId(data.settings.activeProviderId);
+    setDraftProviders(
+      data.settings.providers.map((provider) => ({ ...provider })),
+    );
+    setShowApiKey(false);
+    setBreakArmorOpen(false);
+    setProbeMessage("");
+    setProbeError("");
+    setAvailableModels([]);
+  };
 
   const applyModelSettings = () => {
-    if (!draftProvider || !modelSettingsDirty || !modelSettingsValid) return
-    patchSettings({ activeProviderId: draftProvider.id, providers: draftProviders })
-    onToast(`${draftProvider.name} 模型配置已应用`)
-  }
+    if (!draftProvider || !modelSettingsDirty || !modelSettingsValid) return;
+    patchSettings({
+      activeProviderId: draftProvider.id,
+      providers: draftProviders,
+    });
+    onToast(`${draftProvider.name} 模型配置已应用`);
+  };
+
+  const runProbe = async (mode: "testing" | "listing") => {
+    if (!draftProvider || !canProbe) return;
+    probeAbortRef.current?.abort();
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
+    setProbeBusy(mode);
+    setProbeMessage("");
+    setProbeError("");
+    try {
+      if (mode === "listing") {
+        const models = await listProviderModels(
+          draftProvider,
+          controller.signal,
+        );
+        setAvailableModels(models);
+        if (!models.length) {
+          setProbeError("接口已连通，但未返回可用模型");
+          onToast("未获取到可用模型");
+          return;
+        }
+        setProbeMessage(`已获取 ${models.length} 个可用模型，点击即可填入`);
+        onToast(`已获取 ${models.length} 个可用模型`);
+        return;
+      }
+      const result = await testProviderConnection(
+        draftProvider,
+        controller.signal,
+      );
+      if (result.models.length) setAvailableModels(result.models);
+      setProbeMessage(result.detail);
+      onToast("连接测试成功");
+    } catch (reason) {
+      if (controller.signal.aborted) return;
+      const message = reason instanceof Error ? reason.message : "探测失败";
+      setProbeError(message);
+      onToast(mode === "listing" ? "获取模型失败" : "连接测试失败");
+    } finally {
+      if (probeAbortRef.current === controller) {
+        probeAbortRef.current = null;
+        setProbeBusy("idle");
+      }
+    }
+  };
 
   return (
     <div className="page-scroll settings-page">
-      <div className="page-heading"><h1>设置</h1><p>密钥和创作数据仅保存在当前浏览器。</p></div>
-      <SettingsSection title="AI 模型" description="选择默认模型，并填写对应服务商的访问凭证。">
-        <div className="provider-choice-grid" role="radiogroup" aria-label="默认提供商">
+      <div className="page-heading">
+        <h1>设置</h1>
+        <p>密钥和创作数据仅保存在当前浏览器。</p>
+      </div>
+      <SettingsSection
+        title="AI 模型"
+        description="选择默认模型，并填写对应服务商的访问凭证。"
+      >
+        <div
+          className="provider-choice-grid"
+          role="radiogroup"
+          aria-label="默认提供商"
+        >
           {draftProviders.map((provider) => {
-            const selected = provider.id === draftProvider?.id
-            const current = provider.id === currentProvider?.id
+            const selected = provider.id === draftProvider?.id;
+            const current = provider.id === currentProvider?.id;
             return (
               <button
                 type="button"
                 role="radio"
                 aria-checked={selected}
                 aria-label={`${provider.name} · ${provider.model}`}
-                className={`provider-choice ${selected ? 'selected' : ''} ${current ? 'current' : ''}`}
+                className={`provider-choice ${selected ? "selected" : ""} ${current ? "current" : ""}`}
                 key={provider.id}
                 onClick={() => setDraftProviderId(provider.id)}
               >
                 <ProviderMark id={provider.id} />
-                <span className="provider-choice-copy"><strong>{provider.name}</strong><small>{provider.model}</small></span>
+                <span className="provider-choice-copy">
+                  <strong>{provider.name}</strong>
+                  <small>{provider.model}</small>
+                </span>
                 <span className="provider-choice-state">
                   {selected ? <Check size={13} /> : null}
-                  {current ? '当前使用' : selected ? '待确认' : provider.apiKey ? '已配置' : '未配置'}
+                  {current
+                    ? "当前使用"
+                    : selected
+                      ? "待确认"
+                      : provider.apiKey
+                        ? "已配置"
+                        : "未配置"}
                 </span>
               </button>
-            )
+            );
           })}
         </div>
 
         {draftProvider ? (
           <div className="provider-config">
             <div className="provider-config-head">
-              <div><ProviderMark id={draftProvider.id} /><span><strong>{draftProvider.name} 配置</strong><small>{draftProvider.model}</small></span></div>
-              <span className={`provider-key-state ${draftProvider.apiKey ? 'configured' : ''}`}><ShieldCheck size={14} />{draftProvider.apiKey ? '密钥已配置' : '密钥未配置'}</span>
+              <div>
+                <ProviderMark id={draftProvider.id} />
+                <span>
+                  <strong>{draftProvider.name} 配置</strong>
+                  <small>{draftProvider.model}</small>
+                </span>
+              </div>
+              <span
+                className={`provider-key-state ${draftProvider.apiKey ? "configured" : ""}`}
+              >
+                <ShieldCheck size={14} />
+                {draftProvider.apiKey ? "密钥已配置" : "密钥未配置"}
+              </span>
             </div>
             <div className="provider-config-grid">
-              <Field label="接口地址"><input value={draftProvider.baseUrl} onChange={(event) => patchDraftProvider(draftProvider.id, { baseUrl: event.target.value })} /></Field>
-              <Field label="模型"><input value={draftProvider.model} onChange={(event) => patchDraftProvider(draftProvider.id, { model: event.target.value })} /></Field>
+              <Field label="接口地址">
+                <input
+                  value={draftProvider.baseUrl}
+                  onChange={(event) =>
+                    patchDraftProvider(draftProvider.id, {
+                      baseUrl: event.target.value,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="模型">
+                <input
+                  list={`provider-models-${draftProvider.id}`}
+                  value={draftProvider.model}
+                  onChange={(event) =>
+                    patchDraftProvider(draftProvider.id, {
+                      model: event.target.value,
+                    })
+                  }
+                  placeholder="deepseek-chat"
+                />
+                {availableModels.length ? (
+                  <datalist id={`provider-models-${draftProvider.id}`}>
+                    {availableModels.map((model) => (
+                      <option value={model} key={model} />
+                    ))}
+                  </datalist>
+                ) : null}
+              </Field>
               <div className="field">
-                <span id="provider-api-key-label">API Key<small>仅保存在当前浏览器</small></span>
+                <span id="provider-api-key-label">
+                  API Key<small>仅保存在当前浏览器</small>
+                </span>
                 <div className="secret-input">
-                  <input aria-labelledby="provider-api-key-label" type={showApiKey ? 'text' : 'password'} autoComplete="off" value={draftProvider.apiKey} onChange={(event) => patchDraftProvider(draftProvider.id, { apiKey: event.target.value })} placeholder="sk-••••••••" />
-                  <button type="button" className="icon-button small" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? '隐藏密钥' : '显示密钥'} title={showApiKey ? '隐藏密钥' : '显示密钥'}>
+                  <input
+                    aria-labelledby="provider-api-key-label"
+                    type={showApiKey ? "text" : "password"}
+                    autoComplete="off"
+                    value={draftProvider.apiKey}
+                    onChange={(event) =>
+                      patchDraftProvider(draftProvider.id, {
+                        apiKey: event.target.value,
+                      })
+                    }
+                    placeholder="sk-••••••••"
+                  />
+                  <button
+                    type="button"
+                    className="icon-button small"
+                    onClick={() => setShowApiKey((visible) => !visible)}
+                    aria-label={showApiKey ? "隐藏密钥" : "显示密钥"}
+                    title={showApiKey ? "隐藏密钥" : "显示密钥"}
+                  >
                     {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
               </div>
             </div>
+
+            <div className="provider-probe">
+              <div className="provider-probe-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!canProbe}
+                  onClick={() => void runProbe("testing")}
+                >
+                  {probeBusy === "testing" ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <ShieldCheck size={15} />
+                  )}
+                  {probeBusy === "testing" ? "测试中…" : "测试连接"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!canProbe}
+                  onClick={() => void runProbe("listing")}
+                >
+                  {probeBusy === "listing" ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <Bot size={15} />
+                  )}
+                  {probeBusy === "listing" ? "获取中…" : "获取可用模型"}
+                </button>
+                <button
+                  type="button"
+                  className={`secondary-button ${breakArmorOpen || draftProvider.breakArmorPrompt?.trim() ? "active" : ""}`}
+                  onClick={() => setBreakArmorOpen((open) => !open)}
+                  aria-expanded={breakArmorOpen}
+                  aria-controls="provider-break-armor"
+                >
+                  <Swords size={15} />
+                  破甲
+                  {draftProvider.breakArmorPrompt?.trim() ? (
+                    <span className="break-armor-badge">已启用</span>
+                  ) : null}
+                </button>
+              </div>
+              {breakArmorOpen ? (
+                <div className="break-armor-panel" id="provider-break-armor">
+                  <label className="field">
+                    <span>
+                      破甲指令
+                      <small>会加在该模型每次调用的系统提示最前面</small>
+                    </span>
+                    <textarea
+                      rows={5}
+                      value={draftProvider.breakArmorPrompt ?? ""}
+                      onChange={(event) =>
+                        patchDraftProvider(draftProvider.id, {
+                          breakArmorPrompt: event.target.value,
+                        })
+                      }
+                      placeholder="在此输入自定义前置指令。留空则不启用。"
+                    />
+                  </label>
+                  <div className="break-armor-actions">
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={!draftProvider.breakArmorPrompt?.trim()}
+                      onClick={() =>
+                        patchDraftProvider(draftProvider.id, {
+                          breakArmorPrompt: "",
+                        })
+                      }
+                    >
+                      清空指令
+                    </button>
+                    <small>修改后需点击下方「确定并应用」才会生效</small>
+                  </div>
+                </div>
+              ) : null}
+              {probeMessage ? (
+                <p className="provider-probe-message ok" aria-live="polite">
+                  <Check size={14} />
+                  {probeMessage}
+                </p>
+              ) : null}
+              {probeError ? (
+                <p className="provider-probe-message error" aria-live="polite">
+                  {probeError}
+                </p>
+              ) : null}
+              {!probeMessage && !probeError && !breakArmorOpen ? (
+                <p className="provider-probe-hint">
+                  填写接口地址与 API Key
+                  后，可测试连通性、拉取可用模型，或配置破甲前置指令。
+                </p>
+              ) : null}
+              {availableModels.length ? (
+                <div
+                  className="provider-model-list"
+                  role="listbox"
+                  aria-label="可用模型"
+                >
+                  {availableModels.map((model) => {
+                    const selected = model === draftProvider.model;
+                    return (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={`provider-model-chip ${selected ? "selected" : ""}`}
+                        key={model}
+                        onClick={() =>
+                          patchDraftProvider(draftProvider.id, { model })
+                        }
+                        title={model}
+                      >
+                        {selected ? <Check size={12} /> : null}
+                        <span>{model}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
         <div className="model-settings-actions">
-          <span className={`model-settings-state ${modelSettingsDirty ? 'dirty' : ''}`} aria-live="polite">
-            {modelSettingsDirty
-              ? modelSettingsValid ? `将应用 ${draftProvider?.name ?? '所选模型'} 的新配置` : '请补全接口地址和模型名称'
-              : <><Check size={14} />当前配置已应用</>}
+          <span
+            className={`model-settings-state ${modelSettingsDirty ? "dirty" : ""}`}
+            aria-live="polite"
+          >
+            {modelSettingsDirty ? (
+              modelSettingsValid ? (
+                `将应用 ${draftProvider?.name ?? "所选模型"} 的新配置`
+              ) : (
+                "请补全接口地址和模型名称"
+              )
+            ) : (
+              <>
+                <Check size={14} />
+                当前配置已应用
+              </>
+            )}
           </span>
           <div>
-            <button type="button" className="secondary-button" onClick={resetModelSettings} disabled={!modelSettingsDirty}><RotateCcw size={15} />撤销更改</button>
-            <button type="button" className="primary-button model-confirm-button" onClick={applyModelSettings} disabled={!modelSettingsDirty || !modelSettingsValid}><Check size={16} />确定并应用</button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={resetModelSettings}
+              disabled={!modelSettingsDirty}
+            >
+              <RotateCcw size={15} />
+              撤销更改
+            </button>
+            <button
+              type="button"
+              className="primary-button model-confirm-button"
+              onClick={applyModelSettings}
+              disabled={!modelSettingsDirty || !modelSettingsValid}
+            >
+              <Check size={16} />
+              确定并应用
+            </button>
           </div>
         </div>
       </SettingsSection>
 
-      <SettingsSection title="小说 Skills" description="已内置到 AI 生成和质量流水线，可在一键创作时选择执行深度。">
+      <SettingsSection
+        title="小说 Skills"
+        description="已内置到 AI 生成和质量流水线，可在一键创作时选择执行深度。"
+      >
         <div className="workflow-skill-list">
           {writingWorkflows.map((workflow, index) => (
             <div className="workflow-skill" key={workflow.id}>
               <span className="workflow-order">{index + 1}</span>
-              <span><strong>{workflow.name}</strong><small>{workflow.source} · {workflow.description}</small></span>
-              <span className="installed-badge"><Check size={12} />已安装</span>
+              <span>
+                <strong>{workflow.name}</strong>
+                <small>
+                  {workflow.source} · {workflow.description}
+                </small>
+              </span>
+              <span className="installed-badge">
+                <Check size={12} />
+                已安装
+              </span>
             </div>
           ))}
         </div>
       </SettingsSection>
 
-      <SettingsSection title="写作偏好" description="调整正文编辑区的阅读与输入体验。">
+      {activeProject ? (
+        <SettingsSection
+          title="设定上下文预算"
+          description={`当前作品《${activeProject.title}》写入 AI 系统提示的设定体量估算（字符约数）。`}
+        >
+          {(() => {
+            const budget = estimateContextBudget(activeProject);
+            const levelLabel =
+              budget.level === "high"
+                ? "偏高"
+                : budget.level === "medium"
+                  ? "适中"
+                  : "轻松";
+            return (
+              <div className="context-budget-panel">
+                <div
+                  className={`context-budget-summary context-budget-${budget.level}`}
+                >
+                  <strong>
+                    约 {budget.total.toLocaleString()} 字 · {levelLabel}
+                  </strong>
+                  <p>
+                    {budget.level === "high"
+                      ? "建议精简世界观/情节条目，或只留置顶记忆，避免挤占正文指令。"
+                      : budget.level === "medium"
+                        ? "体量尚可；长书写作时优先维护置顶记忆与关键角色。"
+                        : "当前设定体量较轻，可继续补充角色与加料规范。"}
+                  </p>
+                </div>
+                <div className="context-budget-grid">
+                  {(
+                    [
+                      ["角色", budget.characters],
+                      ["世界观", budget.world],
+                      ["情节", budget.plot],
+                      ["章纲", budget.outline],
+                      ["记忆", budget.memories],
+                      ["加料", budget.seasoning],
+                    ] as const
+                  ).map(([label, value]) => (
+                    <div key={label} className="context-budget-cell">
+                      <span>{label}</span>
+                      <strong>{value.toLocaleString()}</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </SettingsSection>
+      ) : null}
+
+      <SettingsSection
+        title="写作偏好"
+        description="调整正文编辑区的阅读与输入体验。"
+      >
         <div className="settings-grid">
-          <Field label="界面主题"><select value={data.settings.theme} onChange={(event) => patchSettings({ theme: event.target.value as AppData['settings']['theme'] })}><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select></Field>
-          <Field label="正文字体"><select value={data.settings.fontFamily} onChange={(event) => patchSettings({ fontFamily: event.target.value as 'serif' | 'sans' })}><option value="serif">宋体 / 衬线</option><option value="sans">黑体 / 无衬线</option></select></Field>
-          <Field label={`字号 · ${data.settings.fontSize}px`}><input type="range" min="15" max="24" value={data.settings.fontSize} onChange={(event) => patchSettings({ fontSize: Number(event.target.value) })} /></Field>
+          <Field label="界面主题">
+            <select
+              value={data.settings.theme}
+              onChange={(event) =>
+                patchSettings({
+                  theme: event.target.value as AppData["settings"]["theme"],
+                })
+              }
+            >
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+              <option value="system">跟随系统</option>
+            </select>
+          </Field>
+          <Field label="正文字体">
+            <select
+              value={data.settings.fontFamily}
+              onChange={(event) =>
+                patchSettings({
+                  fontFamily: event.target.value as "serif" | "sans",
+                })
+              }
+            >
+              <option value="serif">宋体 / 衬线</option>
+              <option value="sans">黑体 / 无衬线</option>
+            </select>
+          </Field>
+          <Field label={`字号 · ${data.settings.fontSize}px`}>
+            <input
+              type="range"
+              min="15"
+              max="24"
+              value={data.settings.fontSize}
+              onChange={(event) =>
+                patchSettings({ fontSize: Number(event.target.value) })
+              }
+            />
+          </Field>
         </div>
       </SettingsSection>
 
-      <SettingsSection title="本地数据" description="定期导出 JSON 备份，以便迁移浏览器或设备。">
+      <SettingsSection
+        title="本地数据"
+        description="定期导出 JSON 备份，以便迁移浏览器或设备。导出和导入都不会携带 API Key。"
+      >
         <div className="data-actions">
-          <button className="secondary-button" onClick={() => exportData(data)}><Download size={17} />导出全部数据</button>
-          <label className="secondary-button file-button"><Import size={17} />导入备份<input type="file" accept="application/json" onChange={onImport} /></label>
-          <button className="secondary-button" onClick={onRestoreProject}><RotateCcw size={17} />恢复最近删除的小说</button>
+          <button className="secondary-button" onClick={() => exportData(data)}>
+            <Download size={17} />
+            导出全部数据
+          </button>
+          <label className="secondary-button file-button">
+            <Import size={17} />
+            导入备份
+            <input type="file" accept="application/json" onChange={onImport} />
+          </label>
+          <button className="secondary-button" onClick={onRestoreProject}>
+            <RotateCcw size={17} />
+            恢复最近删除的小说
+          </button>
         </div>
       </SettingsSection>
 
       {activeProject ? (
-        <SettingsSection title="危险操作" description="删除小说后将从工作区移除，请先导出备份。" danger>
-          <button className="secondary-button danger" onClick={() => {
-            if (window.confirm(`确定删除《${activeProject.title}》吗？`)) onDeleteProject(activeProject)
-          }}><Trash2 size={17} />删除当前小说</button>
+        <SettingsSection
+          title="危险操作"
+          description="删除小说后将从工作区移除，请先导出备份。"
+          danger
+        >
+          <button
+            className="secondary-button danger"
+            onClick={() => {
+              if (window.confirm(`确定删除《${activeProject.title}》吗？`))
+                onDeleteProject(activeProject);
+            }}
+          >
+            <Trash2 size={17} />
+            删除当前小说
+          </button>
         </SettingsSection>
       ) : null}
     </div>
-  )
+  );
 }
 
-function SettingsSection({ title, description, children, danger = false }: { title: string; description: string; children: ReactNode; danger?: boolean }) {
-  return <section className={`settings-section ${danger ? 'danger-section' : ''}`}><div className="settings-section-title"><h2>{title}</h2><p>{description}</p></div><div className="settings-section-body">{children}</div></section>
+function SettingsSection({
+  title,
+  description,
+  children,
+  danger = false,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+  danger?: boolean;
+}) {
+  return (
+    <section className={`settings-section ${danger ? "danger-section" : ""}`}>
+      <div className="settings-section-title">
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </div>
+      <div className="settings-section-body">{children}</div>
+    </section>
+  );
 }
 
 function ProviderMark({ id }: { id: string }) {
-  const label = id === 'deepseek' ? 'DS' : id === 'openai' ? 'OA' : id === 'kimi' ? 'K' : 'AI'
-  return <span className={`provider-logo provider-${id}`}>{label}</span>
+  const label =
+    id === "deepseek"
+      ? "DS"
+      : id === "openai"
+        ? "OA"
+        : id === "kimi"
+          ? "K"
+          : "AI";
+  return <span className={`provider-logo provider-${id}`}>{label}</span>;
 }
 
-function AiMark({ className = '' }: { className?: string }) {
+function AiMark({ className = "" }: { className?: string }) {
   return (
     <span className={`ai-mark ${className}`} aria-hidden="true">
       <Feather className="ai-mark-feather" size={18} />
       <Sparkles className="ai-mark-spark" size={9} />
     </span>
-  )
+  );
 }
 
 interface AiPanelProps {
-  data: AppData
-  project: NovelProject
-  chapter: Chapter | null
-  onClose: () => void
-  onInsert: (chapterId: string, text: string) => void
-  onReplace: (chapterId: string, text: string) => void
-  onRestore: (chapterId: string) => void
-  onPersistMemory: (chapterId: string, messages: AiMessage[]) => void
-  onRecordUsage: (usage: AiUsage, source: AiUsageRecord['source'], words: number, chapterId: string | undefined, provider: { id: string; model: string }) => void
-  onRecordOperation: (operation: Omit<AiOperation, 'id' | 'createdAt'>) => void
-  onUndoOperation: (operationId: string) => void
+  data: AppData;
+  project: NovelProject;
+  chapter: Chapter | null;
+  onClose: () => void;
+  onInsert: (chapterId: string, text: string) => void;
+  onReplace: (chapterId: string, text: string) => void;
+  onReplaceMany: (updates: Array<{ chapterId: string; text: string }>) => void;
+  onRestore: (chapterId: string) => void;
+  onPersistMemory: (chapterId: string, messages: AiMessage[]) => void;
+  onRecordUsage: (
+    usage: AiUsage,
+    source: AiUsageRecord["source"],
+    words: number,
+    chapterId: string | undefined,
+    provider: { id: string; model: string },
+  ) => void;
+  onRecordOperation: (operation: Omit<AiOperation, "id" | "createdAt">) => void;
+  onUndoOperation: (operationId: string) => void;
 }
 
-type AiPanelMode = 'auto' | 'takeover'
-type AiTurnIntent = 'chat' | 'takeover' | 'append'
-type AiPanelPosition = { left: number; top: number }
-type AiQuickAction = { label: string; prompt: string; icon: LucideIcon; intent: AiTurnIntent }
+type AiPanelMode = "auto" | "takeover";
+type AiTurnIntent = "chat" | "takeover" | "append" | "bridge";
+type AiPanelPosition = { left: number; top: number };
+type AiQuickAction = {
+  label: string;
+  prompt: string;
+  icon: LucideIcon;
+  intent: AiTurnIntent;
+};
 
-const AI_PANEL_VIEWPORT_GAP = 12
-const AI_GREETING_PATTERN = /^(?:你好|您好|嗨|哈喽|hello|hi|在吗|早上好|下午好|晚上好|谢谢|多谢|感谢|好的|好呀|知道了|明白了|再见)[\s，,。.!！?？~～]*$/i
-const AI_CONSULTATION_PATTERN = /(?:怎么|如何|为什么|哪里|哪些|是否|要不要|能否|可以吗|行吗|好吗|你觉得|建议|分析|评价|看法|有什么问题|需要改吗|[?？])/
-const AI_ADVICE_ONLY_PATTERN = /(?:先别|不要|暂时别|无需).{0,10}(?:修改|改写|重写|替换|改正文|动正文).{0,16}(?:只|先).*(?:建议|分析|告诉|指出|讨论)/
-const AI_APPEND_PATTERN = /(?:续写|接着写|往下写|补写后续)/
-const AI_EDIT_ACTION_PATTERN = /(?:修改|改写|重写|润色|优化|调整|删减|压缩|精简|扩写|补写|替换|强化|增强|弱化|增加|减少|删除|修订|重构|提升|收紧|加快|放慢|改成|换成|改(?:一下|一遍|一版|下|得|为)|写(?:得|成))/
-const AI_EXPLICIT_EDIT_PATTERN = /(?:^|[，,。；;！!\s])(?:请|帮我|替我|给我|直接|马上|麻烦|把|将|我想(?:要)?|我希望|需要)?\s*(?:修改|改写|重写|润色|优化|调整|删减|压缩|精简|扩写|补写|替换|强化|增强|弱化|增加|减少|删除|修订|重构|提升|收紧|加快|放慢|改成|换成|改(?:一下|一遍|一版|下|得|为)|写(?:得|成))/
-const AI_EDIT_TARGET_PATTERN = /(?:本章|这章|这一章|章节|正文|原文|开头|结尾|章末|段落|这段|对白|对话|节奏|文风|视角|冲突|情节|场景|人物|氛围|钩子|字数|内容)/
-const AI_SHORT_DIRECTIVE_PATTERN = /(?:更|再|少一些|多一些|快一点|慢一点|紧凑一点|有张力一点|突出|加强|收紧)/
+const AI_PANEL_VIEWPORT_GAP = 12;
+const AI_GREETING_PATTERN =
+  /^(?:你好|您好|嗨|哈喽|hello|hi|在吗|早上好|下午好|晚上好|谢谢|多谢|感谢|好的|好呀|知道了|明白了|再见)[\s，,。.!！?？~～]*$/i;
+const AI_CONSULTATION_PATTERN =
+  /(?:怎么|如何|为什么|哪里|哪些|是否|要不要|能否|可以吗|行吗|好吗|你觉得|建议|分析|评价|看法|有什么问题|需要改吗|[?？])/;
+const AI_ADVICE_ONLY_PATTERN =
+  /(?:先别|不要|暂时别|无需).{0,10}(?:修改|改写|重写|替换|改正文|动正文).{0,16}(?:只|先).*(?:建议|分析|告诉|指出|讨论)/;
+const AI_APPEND_PATTERN = /(?:续写|接着写|往下写|补写后续)/;
+const AI_EDIT_ACTION_PATTERN =
+  /(?:修改|改写|重写|润色|优化|调整|删减|压缩|精简|扩写|补写|替换|强化|增强|弱化|增加|减少|删除|修订|重构|提升|收紧|加快|放慢|改成|换成|改(?:一下|一遍|一版|下|得|为)|写(?:得|成))/;
+const AI_EXPLICIT_EDIT_PATTERN =
+  /(?:^|[，,。；;！!\s])(?:请|帮我|替我|给我|直接|马上|麻烦|把|将|我想(?:要)?|我希望|需要)?\s*(?:修改|改写|重写|润色|优化|调整|删减|压缩|精简|扩写|补写|替换|强化|增强|弱化|增加|减少|删除|修订|重构|提升|收紧|加快|放慢|改成|换成|改(?:一下|一遍|一版|下|得|为)|写(?:得|成))/;
+const AI_EDIT_TARGET_PATTERN =
+  /(?:本章|这章|这一章|章节|正文|原文|开头|结尾|章末|段落|这段|对白|对话|节奏|文风|视角|冲突|情节|场景|人物|氛围|钩子|字数|内容)/;
+const AI_SHORT_DIRECTIVE_PATTERN =
+  /(?:更|再|少一些|多一些|快一点|慢一点|紧凑一点|有张力一点|突出|加强|收紧)/;
 
 const resolveAiTurnIntent = (prompt: string): AiTurnIntent => {
-  const value = prompt.trim()
-  if (!value || AI_GREETING_PATTERN.test(value) || AI_ADVICE_ONLY_PATTERN.test(value)) return 'chat'
-  const consultation = AI_CONSULTATION_PATTERN.test(value)
-  if (consultation && !AI_EXPLICIT_EDIT_PATTERN.test(value)) return 'chat'
-  if (AI_APPEND_PATTERN.test(value)) return 'append'
-  if (AI_EXPLICIT_EDIT_PATTERN.test(value) || (!consultation && AI_EDIT_ACTION_PATTERN.test(value))) return 'takeover'
-  if (!consultation && AI_EDIT_TARGET_PATTERN.test(value) && AI_SHORT_DIRECTIVE_PATTERN.test(value)) return 'takeover'
-  return 'chat'
-}
+  const value = prompt.trim();
+  if (
+    !value ||
+    AI_GREETING_PATTERN.test(value) ||
+    AI_ADVICE_ONLY_PATTERN.test(value)
+  )
+    return "chat";
+  const consultation = AI_CONSULTATION_PATTERN.test(value);
+  if (consultation && !AI_EXPLICIT_EDIT_PATTERN.test(value)) return "chat";
+  if (AI_APPEND_PATTERN.test(value)) return "append";
+  if (
+    AI_EXPLICIT_EDIT_PATTERN.test(value) ||
+    (!consultation && AI_EDIT_ACTION_PATTERN.test(value))
+  )
+    return "takeover";
+  if (
+    !consultation &&
+    AI_EDIT_TARGET_PATTERN.test(value) &&
+    AI_SHORT_DIRECTIVE_PATTERN.test(value)
+  )
+    return "takeover";
+  return "chat";
+};
 
-const clampAiPanelPosition = (left: number, top: number, width: number, height: number): AiPanelPosition => ({
-  left: Math.min(Math.max(AI_PANEL_VIEWPORT_GAP, left), Math.max(AI_PANEL_VIEWPORT_GAP, window.innerWidth - width - AI_PANEL_VIEWPORT_GAP)),
-  top: Math.min(Math.max(AI_PANEL_VIEWPORT_GAP, top), Math.max(AI_PANEL_VIEWPORT_GAP, window.innerHeight - height - AI_PANEL_VIEWPORT_GAP)),
-})
+const clampAiPanelPosition = (
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): AiPanelPosition => ({
+  left: Math.min(
+    Math.max(AI_PANEL_VIEWPORT_GAP, left),
+    Math.max(
+      AI_PANEL_VIEWPORT_GAP,
+      window.innerWidth - width - AI_PANEL_VIEWPORT_GAP,
+    ),
+  ),
+  top: Math.min(
+    Math.max(AI_PANEL_VIEWPORT_GAP, top),
+    Math.max(
+      AI_PANEL_VIEWPORT_GAP,
+      window.innerHeight - height - AI_PANEL_VIEWPORT_GAP,
+    ),
+  ),
+});
 
-const normalizeAiChapter = (value: string) => value
-  .trim()
-  .replace(/^```(?:text|markdown)?\s*/i, '')
-  .replace(/\s*```$/, '')
-  .trim()
+const normalizeAiChapter = (value: string) =>
+  value
+    .trim()
+    .replace(/^```(?:text|markdown)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
 
-function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onRestore, onPersistMemory, onRecordUsage, onRecordOperation, onUndoOperation }: AiPanelProps) {
-  const [messages, setMessages] = useState<AiMessage[]>([])
-  const [input, setInput] = useState('')
-  const [mode, setMode] = useState<AiPanelMode>('auto')
-  const [streaming, setStreaming] = useState(false)
-  const [error, setError] = useState('')
-  const [responseText, setResponseText] = useState('')
-  const [responseIntent, setResponseIntent] = useState<AiTurnIntent | null>(null)
-  const [responseChapterId, setResponseChapterId] = useState<string | null>(null)
-  const [revisionSourceContent, setRevisionSourceContent] = useState('')
-  const [revisionSourceUpdatedAt, setRevisionSourceUpdatedAt] = useState(0)
-  const [responseComplete, setResponseComplete] = useState(false)
-  const [responseUsage, setResponseUsage] = useState<AiUsage | null>(null)
-  const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false)
-  const [panelPosition, setPanelPosition] = useState<AiPanelPosition | null>(null)
-  const [panelDragging, setPanelDragging] = useState(false)
-  const [desktopPanel, setDesktopPanel] = useState(() => window.matchMedia('(min-width: 641px)').matches)
-  const abortRef = useRef<AbortController | null>(null)
-  const messageEndRef = useRef<HTMLDivElement | null>(null)
-  const panelRef = useRef<HTMLElement | null>(null)
+function AiPanel({
+  data,
+  project,
+  chapter,
+  onClose,
+  onInsert,
+  onReplace,
+  onReplaceMany,
+  onRestore,
+  onPersistMemory,
+  onRecordUsage,
+  onRecordOperation,
+  onUndoOperation,
+}: AiPanelProps) {
+  const [messages, setMessages] = useState<AiMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [mode, setMode] = useState<AiPanelMode>("auto");
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState("");
+  const [responseText, setResponseText] = useState("");
+  const [responseIntent, setResponseIntent] = useState<AiTurnIntent | null>(
+    null,
+  );
+  const [responseChapterId, setResponseChapterId] = useState<string | null>(
+    null,
+  );
+  const [revisionSourceContent, setRevisionSourceContent] = useState("");
+  const [revisionSourceUpdatedAt, setRevisionSourceUpdatedAt] = useState(0);
+  const [responseComplete, setResponseComplete] = useState(false);
+  const [responseUsage, setResponseUsage] = useState<AiUsage | null>(null);
+  const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
+  const [bridgeDrafts, setBridgeDrafts] = useState<BridgeChapterDraft[]>([]);
+  const [bridgePreviewId, setBridgePreviewId] = useState<string | null>(null);
+  const [panelPosition, setPanelPosition] = useState<AiPanelPosition | null>(
+    null,
+  );
+  const [panelDragging, setPanelDragging] = useState(false);
+  const [desktopPanel, setDesktopPanel] = useState(
+    () => window.matchMedia("(min-width: 641px)").matches,
+  );
+  const abortRef = useRef<AbortController | null>(null);
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
   const panelDragRef = useRef<{
-    pointerId: number
-    startX: number
-    startY: number
-    left: number
-    top: number
-    width: number
-    height: number
-  } | null>(null)
-  const provider = data.settings.providers.find((item) => item.id === data.settings.activeProviderId) ?? data.settings.providers[0]
-  const chapterLocked = chapter?.generationStatus === 'generating' || project.generation?.status === 'generating'
+    pointerId: number;
+    startX: number;
+    startY: number;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const provider =
+    data.settings.providers.find(
+      (item) => item.id === data.settings.activeProviderId,
+    ) ?? data.settings.providers[0];
+  const chapterLocked =
+    chapter?.generationStatus === "generating" ||
+    project.generation?.status === "generating";
 
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages])
-  useEffect(() => () => {
-    abortRef.current?.abort()
-  }, [])
+    messageEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
   useEffect(() => {
-    const media = window.matchMedia('(min-width: 641px)')
+    const media = window.matchMedia("(min-width: 641px)");
     const syncPanelMode = () => {
-      setDesktopPanel(media.matches)
+      setDesktopPanel(media.matches);
       if (!media.matches) {
-        panelDragRef.current = null
-        setPanelDragging(false)
+        panelDragRef.current = null;
+        setPanelDragging(false);
       }
-    }
-    syncPanelMode()
-    media.addEventListener('change', syncPanelMode)
-    return () => media.removeEventListener('change', syncPanelMode)
-  }, [])
+    };
+    syncPanelMode();
+    media.addEventListener("change", syncPanelMode);
+    return () => media.removeEventListener("change", syncPanelMode);
+  }, []);
   useEffect(() => {
     const keepPanelInViewport = () => {
       setPanelPosition((current) => {
-        if (!current || !desktopPanel || !panelRef.current) return current
-        const box = panelRef.current.getBoundingClientRect()
-        return clampAiPanelPosition(current.left, current.top, box.width, box.height)
-      })
-    }
-    keepPanelInViewport()
-    window.addEventListener('resize', keepPanelInViewport)
-    return () => window.removeEventListener('resize', keepPanelInViewport)
-  }, [desktopPanel])
+        if (!current || !desktopPanel || !panelRef.current) return current;
+        const box = panelRef.current.getBoundingClientRect();
+        return clampAiPanelPosition(
+          current.left,
+          current.top,
+          box.width,
+          box.height,
+        );
+      });
+    };
+    keepPanelInViewport();
+    window.addEventListener("resize", keepPanelInViewport);
+    return () => window.removeEventListener("resize", keepPanelInViewport);
+  }, [desktopPanel]);
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !streaming) onClose()
-    }
-    window.addEventListener('keydown', handleEscape)
-    return () => window.removeEventListener('keydown', handleEscape)
-  }, [onClose, streaming])
+      if (event.key === "Escape" && !streaming) onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose, streaming]);
   useEffect(() => {
-    abortRef.current?.abort()
-    setMessages((project.aiMemory ?? []).filter((item) => item.chapterId === chapter?.id).map(({ role, content }) => ({ role, content })))
-    setInput('')
-    setStreaming(false)
-    setError('')
-    setResponseText('')
-    setResponseIntent(null)
-    setResponseChapterId(null)
-    setRevisionSourceContent('')
-    setRevisionSourceUpdatedAt(0)
-    setResponseComplete(false)
-    setResponseUsage(null)
-    setReplaceConfirmOpen(false)
-  }, [project.id, chapter?.id])
+    abortRef.current?.abort();
+    setMessages(
+      (project.aiMemory ?? [])
+        .filter((item) => item.chapterId === chapter?.id)
+        .map(({ role, content }) => ({ role, content })),
+    );
+    setInput("");
+    setStreaming(false);
+    setError("");
+    setResponseText("");
+    setResponseIntent(null);
+    setResponseChapterId(null);
+    setRevisionSourceContent("");
+    setRevisionSourceUpdatedAt(0);
+    setResponseComplete(false);
+    setResponseUsage(null);
+    setReplaceConfirmOpen(false);
+    setBridgeDrafts([]);
+    setBridgePreviewId(null);
+  }, [project.id, chapter?.id]);
 
   const send = async (prompt = input, intentOverride?: AiTurnIntent) => {
-    const cleanPrompt = prompt.trim()
-    if (!cleanPrompt || streaming || !provider) return
-    const turnIntent = intentOverride ?? (mode === 'takeover' ? 'takeover' : resolveAiTurnIntent(cleanPrompt))
-    if (turnIntent !== 'chat' && !chapter) return setError('请先选择要修改的章节')
-    if (turnIntent !== 'chat' && chapterLocked) return setError('全书生成期间不能修改章节，请先暂停生成任务')
-    const userMessage: AiMessage = { role: 'user', content: cleanPrompt }
-    const nextMessages = [...messages, userMessage]
-    setMessages([...nextMessages, { role: 'assistant', content: '' }])
-    setInput('')
-    setError('')
-    setResponseText('')
-    setResponseIntent(turnIntent)
-    setResponseChapterId(chapter?.id ?? null)
-    setRevisionSourceContent(chapter?.content ?? '')
-    setRevisionSourceUpdatedAt(chapter?.updatedAt ?? 0)
-    setResponseComplete(false)
-    setReplaceConfirmOpen(false)
-    setStreaming(true)
-    const controller = new AbortController()
-    abortRef.current = controller
-    let answer = ''
+    const cleanPrompt = prompt.trim();
+    if (!cleanPrompt || streaming || !provider) return;
+    const turnIntent =
+      intentOverride ??
+      (mode === "takeover" ? "takeover" : resolveAiTurnIntent(cleanPrompt));
+    if (turnIntent !== "chat" && !chapter)
+      return setError("请先选择要修改的章节");
+    if (turnIntent !== "chat" && chapterLocked)
+      return setError("全书生成期间不能修改章节，请先暂停生成任务");
+    const userMessage: AiMessage = { role: "user", content: cleanPrompt };
+    const nextMessages = [...messages, userMessage];
+    setMessages([...nextMessages, { role: "assistant", content: "" }]);
+    setInput("");
+    setError("");
+    setResponseText("");
+    setResponseIntent(turnIntent);
+    setResponseChapterId(chapter?.id ?? null);
+    setRevisionSourceContent(chapter?.content ?? "");
+    setRevisionSourceUpdatedAt(chapter?.updatedAt ?? 0);
+    setResponseComplete(false);
+    setReplaceConfirmOpen(false);
+    setBridgeDrafts([]);
+    setBridgePreviewId(null);
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let answer = "";
     try {
-      const requestMessages: AiMessage[] = turnIntent === 'takeover' && chapter
-        ? [...messages, { role: 'user', content: buildChapterTakeoverPrompt(project, chapter.id, cleanPrompt) }]
-        : nextMessages
+      const requestMessages: AiMessage[] =
+        turnIntent === "bridge" && chapter
+          ? [
+              ...messages,
+              {
+                role: "user",
+                content: buildBridgePolishPrompt(
+                  project,
+                  chapter.id,
+                  cleanPrompt,
+                ),
+              },
+            ]
+          : turnIntent === "takeover" && chapter
+            ? [
+                ...messages,
+                {
+                  role: "user",
+                  content: buildChapterTakeoverPrompt(
+                    project,
+                    chapter.id,
+                    cleanPrompt,
+                  ),
+                },
+              ]
+            : nextMessages;
       const usage = await streamChat({
         provider,
         project,
         chapterTitle: chapter?.title,
-        chapterContent: chapter?.content,
-        chapterContextLimit: turnIntent === 'takeover' ? 1200 : 6000,
-        interactionMode: turnIntent === 'chat' ? 'chat' : 'revision',
+        chapterContent: turnIntent === "bridge" ? "" : chapter?.content,
+        chapterContextLimit:
+          turnIntent === "takeover" ? 1200 : turnIntent === "bridge" ? 800 : 6000,
+        interactionMode:
+          turnIntent === "chat"
+            ? "chat"
+            : turnIntent === "bridge"
+              ? "bridge"
+              : "revision",
         messages: requestMessages,
         signal: controller.signal,
         onChunk: (chunk) => {
-          answer += chunk
-          setResponseText(answer)
-          setMessages([...nextMessages, { role: 'assistant', content: answer }])
+          answer += chunk;
+          setResponseText(answer);
+          setMessages([
+            ...nextMessages,
+            { role: "assistant", content: answer },
+          ]);
         },
-      })
-      setResponseUsage(usage)
-      onRecordUsage(usage, turnIntent === 'chat' ? 'chat' : 'revision', countWords(answer), chapter?.id, provider)
-      const completedMessages = [...nextMessages, { role: 'assistant' as const, content: answer }]
-      if (chapter) onPersistMemory(chapter.id, completedMessages)
-      setResponseComplete(Boolean(answer.trim()))
+      });
+      setResponseUsage(usage);
+      onRecordUsage(
+        usage,
+        turnIntent === "chat" ? "chat" : "revision",
+        countWords(answer),
+        chapter?.id,
+        provider,
+      );
+      if (turnIntent === "bridge" && chapter) {
+        const targets = getBridgeChapterTargets(project, chapter.id);
+        const drafts = parseBridgePolishResult(answer, targets);
+        setBridgeDrafts(drafts);
+        setBridgePreviewId(
+          drafts.find((item) => item.changed)?.chapterId ??
+            drafts[0]?.chapterId ??
+            null,
+        );
+        if (!drafts.length) {
+          setError("未能解析跨章润色结果，请重试");
+        }
+      }
+      const completedMessages = [
+        ...nextMessages,
+        { role: "assistant" as const, content: answer },
+      ];
+      if (chapter) onPersistMemory(chapter.id, completedMessages);
+      setResponseComplete(Boolean(answer.trim()));
     } catch (reason) {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'AI 请求失败')
+      if (!controller.signal.aborted)
+        setError(reason instanceof Error ? reason.message : "AI 请求失败");
     } finally {
-      setStreaming(false)
-      abortRef.current = null
+      setStreaming(false);
+      abortRef.current = null;
     }
-  }
+  };
 
-  const quickActions: AiQuickAction[] = mode === 'takeover' ? [
-    { label: '整体润色', prompt: '保留所有剧情事件和信息，只优化语言、段落节奏、动作与对白，让正文更自然有张力。', icon: Feather, intent: 'takeover' },
-    { label: '强化冲突', prompt: '不改变本章事件结果，强化人物目标、阻力、对话博弈和情绪递进。', icon: Swords, intent: 'takeover' },
-    { label: '改写开篇', prompt: '重点重写本章开头，让前 300 字更快进入冲突，同时完成整章必要的衔接修订。', icon: FilePenLine, intent: 'takeover' },
-    { label: '压缩冗余', prompt: '删除重复说明、空泛心理和同构句，保留有效信息并让整章节奏更紧凑。', icon: Minimize2, intent: 'takeover' },
-  ] : [
-    { label: '续写正文', prompt: '请根据现有正文自然续写约800字，延续当前叙事视角、节奏和文风，直接输出正文。', icon: PenLine, intent: 'append' },
-    { label: '润色建议', prompt: '请审阅当前章节，指出最值得优先修改的语言和节奏问题。', icon: ListChecks, intent: 'chat' },
-    { label: '扩写场景', prompt: '找出当前章节最值得扩写的场景，说明应补足的感官、动作和人物反应。', icon: ScanText, intent: 'chat' },
-    { label: '检查一致性', prompt: '结合角色、世界观和情节资料，检查当前章节的设定与人物行为是否存在矛盾。', icon: ShieldCheck, intent: 'chat' },
-  ]
-  const normalizedResponse = normalizeAiChapter(responseText)
-  const responseMatchesChapter = Boolean(chapter && responseChapterId === chapter.id)
+  const quickActions: AiQuickAction[] =
+    mode === "takeover"
+      ? [
+          {
+            label: "整体润色",
+            prompt:
+              "检查上一章、当前章、下一章的衔接与重复，保留所有剧情事件和信息连贯性，禁止多次重复相同内容；必要时连带修改上下两章，让三章正文更自然有张力。",
+            icon: Feather,
+            intent: "bridge",
+          },
+          {
+            label: "强化冲突",
+            prompt:
+              "不改变本章事件结果，强化人物目标、阻力、对话博弈和情绪递进。",
+            icon: Swords,
+            intent: "takeover",
+          },
+          {
+            label: "改写开篇",
+            prompt:
+              "重点重写本章开头，让前 300 字更快进入冲突，同时完成整章必要的衔接修订。",
+            icon: FilePenLine,
+            intent: "takeover",
+          },
+          {
+            label: "压缩冗余",
+            prompt:
+              "删除重复说明、空泛心理和同构句，保留有效信息并让整章节奏更紧凑。",
+            icon: Minimize2,
+            intent: "takeover",
+          },
+        ]
+      : [
+          {
+            label: "续写正文",
+            prompt:
+              "请根据现有正文自然续写约800字，延续当前叙事视角、节奏和文风，直接输出正文。",
+            icon: PenLine,
+            intent: "append",
+          },
+          {
+            label: "润色建议",
+            prompt: "请审阅当前章节，指出最值得优先修改的语言和节奏问题。",
+            icon: ListChecks,
+            intent: "chat",
+          },
+          {
+            label: "扩写场景",
+            prompt:
+              "找出当前章节最值得扩写的场景，说明应补足的感官、动作和人物反应。",
+            icon: ScanText,
+            intent: "chat",
+          },
+          {
+            label: "检查一致性",
+            prompt:
+              "结合角色、世界观和情节资料，检查当前章节的设定与人物行为是否存在矛盾。",
+            icon: ShieldCheck,
+            intent: "chat",
+          },
+        ];
+  const normalizedResponse = normalizeAiChapter(responseText);
+  const responseMatchesChapter = Boolean(
+    chapter && responseChapterId === chapter.id,
+  );
   const responseStale = Boolean(
-    responseIntent === 'takeover'
-    && chapter
-    && responseMatchesChapter
-    && chapter.content.trim() !== normalizedResponse
-    && (chapter.content !== revisionSourceContent || chapter.updatedAt !== revisionSourceUpdatedAt),
-  )
-  const responseApplied = Boolean(chapter && normalizedResponse && chapter.content.trim() === normalizedResponse)
-  const takeoverReady = responseIntent === 'takeover' && responseComplete && responseMatchesChapter && Boolean(normalizedResponse)
-  const appendReady = responseIntent === 'append' && responseComplete && responseMatchesChapter && Boolean(normalizedResponse)
-  const draftIntent = mode === 'takeover' ? 'takeover' : resolveAiTurnIntent(input)
-  const visibleIntent = streaming && responseIntent ? responseIntent : draftIntent
+    (responseIntent === "takeover" || responseIntent === "bridge") &&
+      chapter &&
+      responseMatchesChapter &&
+      (chapter.content !== revisionSourceContent ||
+        chapter.updatedAt !== revisionSourceUpdatedAt),
+  );
+  const responseApplied = Boolean(
+    responseIntent === "takeover" &&
+      chapter &&
+      responseMatchesChapter &&
+      normalizedResponse &&
+      chapter.content.trim() === normalizedResponse,
+  );
+  const changedBridgeDrafts = bridgeDrafts.filter((item) => item.changed);
+  const bridgeApplied = Boolean(
+    responseIntent === "bridge" &&
+      changedBridgeDrafts.length &&
+      changedBridgeDrafts.every((draft) => {
+        const live = project.chapters.find(
+          (item) => item.id === draft.chapterId,
+        );
+        return live && live.content.trim() === draft.content.trim();
+      }),
+  );
+  const takeoverReady =
+    responseIntent === "takeover" &&
+    responseComplete &&
+    responseMatchesChapter &&
+    Boolean(normalizedResponse);
+  const bridgeReady =
+    responseIntent === "bridge" &&
+    responseComplete &&
+    responseMatchesChapter &&
+    changedBridgeDrafts.length > 0;
+  const appendReady =
+    responseIntent === "append" &&
+    responseComplete &&
+    responseMatchesChapter &&
+    Boolean(normalizedResponse);
+  const draftIntent =
+    mode === "takeover" ? "takeover" : resolveAiTurnIntent(input);
+  const visibleIntent =
+    streaming && responseIntent ? responseIntent : draftIntent;
+  const bridgePreview =
+    bridgeDrafts.find((item) => item.chapterId === bridgePreviewId) ??
+    bridgeDrafts[0] ??
+    null;
 
   const applyTakeover = () => {
-    if (!chapter || !takeoverReady || responseStale || responseApplied) return
-    const beforeContent = chapter.content
-    onReplace(chapter.id, normalizedResponse)
-    onRecordOperation({ chapterId: chapter.id, chapterTitle: chapter.title, action: 'replace', prompt: messages.filter((message) => message.role === 'user').at(-1)?.content || '章节 AI 修订', beforeContent, afterContent: normalizedResponse, providerId: provider?.id || '', model: provider?.model || '', tokens: responseUsage?.totalTokens ?? 0 })
-    setReplaceConfirmOpen(false)
-  }
+    if (!chapter || !takeoverReady || responseStale || responseApplied) return;
+    const beforeContent = chapter.content;
+    onReplace(chapter.id, normalizedResponse);
+    onRecordOperation({
+      chapterId: chapter.id,
+      chapterTitle: chapter.title,
+      action: "replace",
+      prompt:
+        messages.filter((message) => message.role === "user").at(-1)?.content ||
+        "章节 AI 修订",
+      beforeContent,
+      afterContent: normalizedResponse,
+      providerId: provider?.id || "",
+      model: provider?.model || "",
+      tokens: responseUsage?.totalTokens ?? 0,
+    });
+    setReplaceConfirmOpen(false);
+  };
+
+  const applyBridge = () => {
+    if (!chapter || !bridgeReady || responseStale || bridgeApplied) return;
+    const updates = changedBridgeDrafts.map((draft) => ({
+      chapterId: draft.chapterId,
+      text: draft.content,
+    }));
+    onReplaceMany(updates);
+    for (const draft of changedBridgeDrafts) {
+      onRecordOperation({
+        chapterId: draft.chapterId,
+        chapterTitle: draft.title,
+        action: "replace",
+        prompt:
+          messages.filter((message) => message.role === "user").at(-1)
+            ?.content || "跨章连贯润色",
+        beforeContent: draft.original,
+        afterContent: draft.content,
+        providerId: provider?.id || "",
+        model: provider?.model || "",
+        tokens: responseUsage?.totalTokens ?? 0,
+      });
+    }
+    setReplaceConfirmOpen(false);
+  };
 
   const applyAppend = () => {
-    if (!chapter || !appendReady) return
-    const beforeContent = chapter.content
-    onInsert(chapter.id, normalizedResponse)
-    onRecordOperation({ chapterId: chapter.id, chapterTitle: chapter.title, action: 'insert', prompt: messages.filter((message) => message.role === 'user').at(-1)?.content || '章节 AI 续写', beforeContent, afterContent: `${beforeContent}${beforeContent ? '\n\n' : ''}${normalizedResponse.trim()}`, providerId: provider?.id || '', model: provider?.model || '', tokens: responseUsage?.totalTokens ?? 0 })
-  }
+    if (!chapter || !appendReady) return;
+    const beforeContent = chapter.content;
+    onInsert(chapter.id, normalizedResponse);
+    onRecordOperation({
+      chapterId: chapter.id,
+      chapterTitle: chapter.title,
+      action: "insert",
+      prompt:
+        messages.filter((message) => message.role === "user").at(-1)?.content ||
+        "章节 AI 续写",
+      beforeContent,
+      afterContent: `${beforeContent}${beforeContent ? "\n\n" : ""}${normalizedResponse.trim()}`,
+      providerId: provider?.id || "",
+      model: provider?.model || "",
+      tokens: responseUsage?.totalTokens ?? 0,
+    });
+  };
 
-  const recentOperations = (project.aiOperations ?? []).filter((operation) => operation.chapterId === chapter?.id).slice(-4).reverse()
+  const recentOperations = (project.aiOperations ?? [])
+    .filter((operation) => operation.chapterId === chapter?.id)
+    .slice(-4)
+    .reverse();
 
   const startPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!desktopPanel || !event.isPrimary || event.button !== 0 || !panelRef.current) return
-    const target = event.target as HTMLElement
-    if (target.closest('button:not(.ai-panel-drag-handle), input, textarea, select, a')) return
-    const box = panelRef.current.getBoundingClientRect()
+    if (
+      !desktopPanel ||
+      !event.isPrimary ||
+      event.button !== 0 ||
+      !panelRef.current
+    )
+      return;
+    const target = event.target as HTMLElement;
+    if (
+      target.closest(
+        "button:not(.ai-panel-drag-handle), input, textarea, select, a",
+      )
+    )
+      return;
+    const box = panelRef.current.getBoundingClientRect();
     panelDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -2086,133 +6132,477 @@ function AiPanel({ data, project, chapter, onClose, onInsert, onReplace, onResto
       top: box.top,
       width: box.width,
       height: box.height,
-    }
-    setPanelPosition({ left: box.left, top: box.top })
-    setPanelDragging(true)
-    event.currentTarget.setPointerCapture(event.pointerId)
-    event.preventDefault()
-  }
+    };
+    setPanelPosition({ left: box.left, top: box.top });
+    setPanelDragging(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
 
   const movePanel = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = panelDragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
-    setPanelPosition(clampAiPanelPosition(
-      drag.left + event.clientX - drag.startX,
-      drag.top + event.clientY - drag.startY,
-      drag.width,
-      drag.height,
-    ))
-    event.preventDefault()
-  }
+    const drag = panelDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPanelPosition(
+      clampAiPanelPosition(
+        drag.left + event.clientX - drag.startX,
+        drag.top + event.clientY - drag.startY,
+        drag.width,
+        drag.height,
+      ),
+    );
+    event.preventDefault();
+  };
 
   const stopPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (panelDragRef.current?.pointerId !== event.pointerId) return
-    panelDragRef.current = null
-    setPanelDragging(false)
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-  }
+    if (panelDragRef.current?.pointerId !== event.pointerId) return;
+    panelDragRef.current = null;
+    setPanelDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+  };
 
-  const movePanelWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (!desktopPanel || !panelRef.current || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
-    const distance = event.shiftKey ? 48 : 16
-    const box = panelRef.current.getBoundingClientRect()
-    const horizontal = event.key === 'ArrowLeft' ? -distance : event.key === 'ArrowRight' ? distance : 0
-    const vertical = event.key === 'ArrowUp' ? -distance : event.key === 'ArrowDown' ? distance : 0
-    setPanelPosition(clampAiPanelPosition(box.left + horizontal, box.top + vertical, box.width, box.height))
-    event.preventDefault()
-  }
+  const movePanelWithKeyboard = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (
+      !desktopPanel ||
+      !panelRef.current ||
+      !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
+    )
+      return;
+    const distance = event.shiftKey ? 48 : 16;
+    const box = panelRef.current.getBoundingClientRect();
+    const horizontal =
+      event.key === "ArrowLeft"
+        ? -distance
+        : event.key === "ArrowRight"
+          ? distance
+          : 0;
+    const vertical =
+      event.key === "ArrowUp"
+        ? -distance
+        : event.key === "ArrowDown"
+          ? distance
+          : 0;
+    setPanelPosition(
+      clampAiPanelPosition(
+        box.left + horizontal,
+        box.top + vertical,
+        box.width,
+        box.height,
+      ),
+    );
+    event.preventDefault();
+  };
 
   return (
     <>
-      <button className="ai-panel-scrim" onClick={onClose} aria-label="关闭章节 AI 助手" />
+      <button
+        className="ai-panel-scrim"
+        onClick={onClose}
+        aria-label="关闭章节 AI 助手"
+      />
       <aside
         ref={panelRef}
-        className={`ai-panel ${panelDragging ? 'dragging' : ''}`}
+        className={`ai-panel ${panelDragging ? "dragging" : ""}`}
         id="chapter-ai-panel"
         role="dialog"
         aria-modal={!desktopPanel}
         aria-label="章节 AI 助手"
         data-draggable={desktopPanel}
-        style={desktopPanel && panelPosition ? { left: panelPosition.left, top: panelPosition.top, right: 'auto', bottom: 'auto' } : undefined}
+        style={
+          desktopPanel && panelPosition
+            ? {
+                left: panelPosition.left,
+                top: panelPosition.top,
+                right: "auto",
+                bottom: "auto",
+              }
+            : undefined
+        }
       >
-      <div
-        className="ai-panel-head"
-        onPointerDown={startPanelDrag}
-        onPointerMove={movePanel}
-        onPointerUp={stopPanelDrag}
-        onPointerCancel={stopPanelDrag}
-        onLostPointerCapture={() => { panelDragRef.current = null; setPanelDragging(false) }}
-      >
-        <div className="ai-panel-identity"><AiMark className="ai-panel-mark" /><span><strong>章节 AI 助手</strong><small>{chapter?.title ?? '未选择章节'} · 仅限本章 · {provider?.name}</small></span></div>
-        <button type="button" className="ai-panel-drag-handle" onKeyDown={movePanelWithKeyboard} aria-label="拖动 AI 面板" title="拖动 AI 面板"><GripHorizontal size={19} /></button>
-        <button className="icon-button" onClick={onClose} aria-label="关闭章节 AI 助手"><X size={19} /></button>
-      </div>
-      <div className="ai-mode-tabs" role="tablist" aria-label="AI 工作方式">
-        <button type="button" role="tab" aria-selected={mode === 'auto'} className={mode === 'auto' ? 'active' : ''} onClick={() => { setMode('auto'); setReplaceConfirmOpen(false); setError('') }}><MessageSquareText size={15} />智能对话</button>
-        <button type="button" role="tab" aria-selected={mode === 'takeover'} className={mode === 'takeover' ? 'active' : ''} onClick={() => { setMode('takeover'); setReplaceConfirmOpen(false); setError('') }}><FilePenLine size={15} />接管本章</button>
-      </div>
-      <div className="ai-chapter-context">
-        <span><BookOpenText size={14} />{chapter?.title ?? '未选择章节'}</span>
-        <small>{chapter ? `${countWords(chapter.content).toLocaleString()} 字` : '无正文'}</small>
-      </div>
-      <div className="quick-actions">
-        {quickActions.map(({ label, prompt, icon: Icon, intent }) => <button key={label} disabled={streaming} onClick={() => void send(prompt, intent)}><Icon size={15} />{label}</button>)}
-      </div>
-      <div className="ai-messages">
-        {!messages.length ? (
-          <div className="ai-welcome"><AiMark className="ai-welcome-mark" /><h3>{mode === 'takeover' ? '等待修改要求' : '和当前章节聊聊'}</h3><p>{chapter?.title ?? '请选择章节'}</p></div>
-        ) : messages.map((message, index) => (
-          <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}>
-            <span className="message-avatar">{message.role === 'assistant' ? <Sparkles size={15} /> : <CircleUserRound size={16} />}</span>
-            <div>{message.content || <span className="typing"><i /><i /><i /></span>}</div>
+        <div
+          className="ai-panel-head"
+          onPointerDown={startPanelDrag}
+          onPointerMove={movePanel}
+          onPointerUp={stopPanelDrag}
+          onPointerCancel={stopPanelDrag}
+          onLostPointerCapture={() => {
+            panelDragRef.current = null;
+            setPanelDragging(false);
+          }}
+        >
+          <div className="ai-panel-identity">
+            <AiMark className="ai-panel-mark" />
+            <span>
+              <strong>章节 AI 助手</strong>
+              <small>
+                {chapter?.title ?? "未选择章节"} · 仅限本章 · {provider?.name}
+              </small>
+            </span>
           </div>
-        ))}
-        {error ? <div className="ai-error" role="alert">{error}</div> : null}
-        <div ref={messageEndRef} />
-      </div>
-
-      {!streaming && (takeoverReady || appendReady) ? (
-        <div className="ai-result-actions" role="status">
-          <span>{takeoverReady ? `${countWords(normalizedResponse).toLocaleString()} 字修订候选稿 · 尚未写入` : `${countWords(normalizedResponse).toLocaleString()} 字续写`}</span>
-          {appendReady && chapter ? <button type="button" className="secondary-button compact" onClick={applyAppend}><FilePlus2 size={15} />追加到本章</button> : null}
-          {takeoverReady && responseStale ? <em>正文已变化，请重新生成候选稿</em> : null}
-          {takeoverReady && responseApplied ? <em className="applied"><Check size={13} />{chapter?.aiRevisionBackup ? '本版本已应用' : '候选稿与正文相同'}</em> : null}
-          {takeoverReady && !responseStale && !responseApplied ? <button type="button" className="primary-button compact" onClick={() => setReplaceConfirmOpen(true)}><Replace size={15} />预览并替换</button> : null}
+          <button
+            type="button"
+            className="ai-panel-drag-handle"
+            onKeyDown={movePanelWithKeyboard}
+            aria-label="拖动 AI 面板"
+            title="拖动 AI 面板"
+          >
+            <GripHorizontal size={19} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={onClose}
+            aria-label="关闭章节 AI 助手"
+          >
+            <X size={19} />
+          </button>
         </div>
-      ) : null}
-
-      {chapter && recentOperations.length ? (
-        <div className="ai-operation-history">
-          <div className="ai-history-head"><span><RotateCcw size={13} />本章操作记录</span><small>本地保存 · 可回退</small></div>
-          {recentOperations.map((operation) => <div className="ai-operation-row" key={operation.id}><span className={`ai-operation-dot ${operation.action}`} /><span className="ai-operation-copy"><strong>{operation.action === 'replace' ? 'AI 修订本章' : operation.action === 'insert' ? 'AI 续写本章' : '已回退上一操作'}</strong><small>{new Date(operation.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} · {operation.model || '本地记录'}</small></span>{operation.action !== 'restore' ? <button type="button" onClick={() => onUndoOperation(operation.id)}><Undo2 size={13} />回退</button> : null}</div>)}
+        <div className="ai-mode-tabs" role="tablist" aria-label="AI 工作方式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "auto"}
+            className={mode === "auto" ? "active" : ""}
+            onClick={() => {
+              setMode("auto");
+              setReplaceConfirmOpen(false);
+              setError("");
+            }}
+          >
+            <MessageSquareText size={15} />
+            智能对话
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "takeover"}
+            className={mode === "takeover" ? "active" : ""}
+            onClick={() => {
+              setMode("takeover");
+              setReplaceConfirmOpen(false);
+              setError("");
+            }}
+          >
+            <FilePenLine size={15} />
+            接管本章
+          </button>
         </div>
-      ) : null}
-
-      {replaceConfirmOpen && chapter ? (
-        <div className="ai-takeover-confirm" role="alert">
-          <div><ShieldCheck size={18} /><span><strong>确认替换《{chapter.title}》</strong><small>当前正文会保留为可恢复版本</small></span></div>
-          <div><button type="button" className="secondary-button compact" onClick={() => setReplaceConfirmOpen(false)}>取消</button><button type="button" className="primary-button compact" onClick={applyTakeover} disabled={responseStale}>确认替换</button></div>
+        <div className="ai-chapter-context">
+          <span>
+            <BookOpenText size={14} />
+            {chapter?.title ?? "未选择章节"}
+          </span>
+          <small>
+            {chapter
+              ? `${countWords(chapter.content).toLocaleString()} 字`
+              : "无正文"}
+          </small>
         </div>
-      ) : null}
+        <div className="quick-actions">
+          {quickActions.map(({ label, prompt, icon: Icon, intent }) => (
+            <button
+              key={label}
+              disabled={streaming}
+              onClick={() => void send(prompt, intent)}
+            >
+              <Icon size={15} />
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="ai-messages">
+          {!messages.length ? (
+            <div className="ai-welcome">
+              <AiMark className="ai-welcome-mark" />
+              <h3>{mode === "takeover" ? "等待修改要求" : "和当前章节聊聊"}</h3>
+              <p>{chapter?.title ?? "请选择章节"}</p>
+            </div>
+          ) : (
+            messages.map((message, index) => (
+              <div
+                className={`ai-message ${message.role}`}
+                key={`${message.role}-${index}`}
+              >
+                <span className="message-avatar">
+                  {message.role === "assistant" ? (
+                    <Sparkles size={15} />
+                  ) : (
+                    <CircleUserRound size={16} />
+                  )}
+                </span>
+                <div>
+                  {message.content || (
+                    <span className="typing">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+          {error ? (
+            <div className="ai-error" role="alert">
+              {error}
+            </div>
+          ) : null}
+          <div ref={messageEndRef} />
+        </div>
 
-      {chapter?.aiRevisionBackup ? (
-        <div className="ai-restore-bar"><span><RotateCcw size={14} />保留有 AI 修改前版本</span><button type="button" onClick={() => onRestore(chapter.id)}>恢复原文</button></div>
-      ) : null}
+        {!streaming && (takeoverReady || appendReady || bridgeReady) ? (
+          <div className="ai-result-actions" role="status">
+            <span>
+              {bridgeReady
+                ? `跨章润色 · ${changedBridgeDrafts.length}/${bridgeDrafts.length} 章有改动`
+                : takeoverReady
+                  ? `${countWords(normalizedResponse).toLocaleString()} 字修订候选稿 · 尚未写入`
+                  : `${countWords(normalizedResponse).toLocaleString()} 字续写`}
+            </span>
+            {appendReady && chapter ? (
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={applyAppend}
+              >
+                <FilePlus2 size={15} />
+                追加到本章
+              </button>
+            ) : null}
+            {(takeoverReady || bridgeReady) && responseStale ? (
+              <em>正文已变化，请重新生成候选稿</em>
+            ) : null}
+            {takeoverReady && responseApplied ? (
+              <em className="applied">
+                <Check size={13} />
+                {chapter?.aiRevisionBackup
+                  ? "本版本已应用"
+                  : "候选稿与正文相同"}
+              </em>
+            ) : null}
+            {bridgeReady && bridgeApplied ? (
+              <em className="applied">
+                <Check size={13} />
+                跨章润色已写入
+              </em>
+            ) : null}
+            {takeoverReady && !responseStale && !responseApplied ? (
+              <button
+                type="button"
+                className="primary-button compact"
+                onClick={() => setReplaceConfirmOpen(true)}
+              >
+                <Replace size={15} />
+                预览并替换
+              </button>
+            ) : null}
+            {bridgeReady && !responseStale && !bridgeApplied ? (
+              <button
+                type="button"
+                className="primary-button compact"
+                onClick={() => setReplaceConfirmOpen(true)}
+              >
+                <Replace size={15} />
+                预览并写入 {changedBridgeDrafts.length} 章
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
-      <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send() }}>
-        <textarea autoFocus value={input} onChange={(event) => setInput(event.target.value)} placeholder={mode === 'takeover' ? '说明这一章要怎么改……' : '和 AI 对话，或直接说修改要求……'} rows={3} onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() }
-        }} />
-        <div><span className={`ai-intent-state ${visibleIntent}`}>
-          {visibleIntent === 'takeover' ? <FilePenLine size={12} /> : visibleIntent === 'append' ? <PenLine size={12} /> : <MessageSquareText size={12} />}
-          {visibleIntent === 'takeover' ? '生成修改稿' : visibleIntent === 'append' ? '生成续写' : '聊天回复'}
-        </span>{streaming ? (
-          <button type="button" className="send-button stop" onClick={() => abortRef.current?.abort()} aria-label="停止生成"><Square size={14} fill="currentColor" /></button>
-        ) : <button type="submit" className="send-button" disabled={!input.trim()} aria-label="发送"><Send size={16} /></button>}</div>
-      </form>
+        {bridgeReady && bridgeDrafts.length ? (
+          <div className="bridge-draft-panel" aria-label="跨章润色预览">
+            <div className="bridge-draft-tabs">
+              {bridgeDrafts.map((draft) => (
+                <button
+                  type="button"
+                  key={draft.chapterId}
+                  className={`${draft.chapterId === bridgePreview?.chapterId ? "active" : ""} ${draft.changed ? "changed" : ""}`}
+                  onClick={() => setBridgePreviewId(draft.chapterId)}
+                >
+                  {draft.role === "previous"
+                    ? "上一章"
+                    : draft.role === "next"
+                      ? "下一章"
+                      : "当前章"}
+                  {draft.changed ? " · 有改动" : " · 未改"}
+                </button>
+              ))}
+            </div>
+            {bridgePreview ? (
+              <div className="bridge-draft-body">
+                <strong>
+                  第{bridgePreview.index}章 · {bridgePreview.title}
+                </strong>
+                <pre>{bridgePreview.content.slice(0, 1200)}{bridgePreview.content.length > 1200 ? "…" : ""}</pre>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {chapter && recentOperations.length ? (
+          <div className="ai-operation-history">
+            <div className="ai-history-head">
+              <span>
+                <RotateCcw size={13} />
+                本章操作记录
+              </span>
+              <small>本地保存 · 可回退</small>
+            </div>
+            {recentOperations.map((operation) => (
+              <div className="ai-operation-row" key={operation.id}>
+                <span className={`ai-operation-dot ${operation.action}`} />
+                <span className="ai-operation-copy">
+                  <strong>
+                    {operation.action === "replace"
+                      ? "AI 修订本章"
+                      : operation.action === "insert"
+                        ? "AI 续写本章"
+                        : "已回退上一操作"}
+                  </strong>
+                  <small>
+                    {new Date(operation.createdAt).toLocaleTimeString("zh-CN", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}{" "}
+                    · {operation.model || "本地记录"}
+                  </small>
+                </span>
+                {operation.action !== "restore" ? (
+                  <button
+                    type="button"
+                    onClick={() => onUndoOperation(operation.id)}
+                  >
+                    <Undo2 size={13} />
+                    回退
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {replaceConfirmOpen && chapter ? (
+          <div className="ai-takeover-confirm" role="alert">
+            <div>
+              <ShieldCheck size={18} />
+              <span>
+                <strong>
+                  {bridgeReady
+                    ? `确认写入 ${changedBridgeDrafts.length} 章跨章润色`
+                    : `确认替换《${chapter.title}》`}
+                </strong>
+                <small>
+                  {bridgeReady
+                    ? changedBridgeDrafts
+                        .map((item) => `第${item.index}章《${item.title}》`)
+                        .join("、")
+                    : "当前正文会保留为可恢复版本"}
+                </small>
+              </span>
+            </div>
+            <div>
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={() => setReplaceConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button compact"
+                onClick={bridgeReady ? applyBridge : applyTakeover}
+                disabled={responseStale}
+              >
+                确认写入
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {chapter?.aiRevisionBackup ? (
+          <div className="ai-restore-bar">
+            <span>
+              <RotateCcw size={14} />
+              保留有 AI 修改前版本
+            </span>
+            <button type="button" onClick={() => onRestore(chapter.id)}>
+              恢复原文
+            </button>
+          </div>
+        ) : null}
+
+        <form
+          className="ai-composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void send();
+          }}
+        >
+          <textarea
+            autoFocus
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            maxLength={12000}
+            placeholder={
+              mode === "takeover"
+                ? "说明这一章要怎么改……"
+                : "和 AI 对话，或直接说修改要求……"
+            }
+            rows={3}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                void send();
+              }
+            }}
+          />
+          <div>
+            <span className={`ai-intent-state ${visibleIntent}`}>
+              {visibleIntent === "takeover" || visibleIntent === "bridge" ? (
+                <FilePenLine size={12} />
+              ) : visibleIntent === "append" ? (
+                <PenLine size={12} />
+              ) : (
+                <MessageSquareText size={12} />
+              )}
+              {visibleIntent === "bridge"
+                ? "跨章润色"
+                : visibleIntent === "takeover"
+                  ? "生成修改稿"
+                  : visibleIntent === "append"
+                    ? "生成续写"
+                    : "聊天回复"}
+            </span>
+            {streaming ? (
+              <button
+                type="button"
+                className="send-button stop"
+                onClick={() => abortRef.current?.abort()}
+                aria-label="停止生成"
+              >
+                <Square size={14} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="send-button"
+                disabled={!input.trim()}
+                aria-label="发送"
+              >
+                <Send size={16} />
+              </button>
+            )}
+          </div>
+        </form>
       </aside>
     </>
-  )
+  );
 }
 
 function AiCreateDialog({
@@ -2222,139 +6612,338 @@ function AiCreateDialog({
   onUsage,
   onOpenSettings,
   onManual,
+  onImportTxt,
 }: {
-  data: AppData
-  onClose: () => void
-  onCreate: (plan: AiNovelPlan, request: AiNovelRequest) => void
-  onUsage: (usage: AiUsage, provider: { id: string; model: string }) => void
-  onOpenSettings: () => void
-  onManual: () => void
+  data: AppData;
+  onClose: () => void;
+  onCreate: (plan: AiNovelPlan, request: AiNovelRequest) => void;
+  onUsage: (usage: AiUsage, provider: { id: string; model: string }) => void;
+  onOpenSettings: () => void;
+  onManual: () => void;
+  onImportTxt: () => void;
 }) {
   const [request, setRequest] = useState<AiNovelRequest>({
-    idea: '',
-    genre: '都市悬疑',
+    idea: "",
+    genre: "都市悬疑",
     chapterCount: 10,
     wordsPerChapter: 2500,
-    style: '画面感强，节奏紧凑，对话自然',
-    constraints: '',
+    style: "画面感强，节奏紧凑，对话自然",
+    constraints: "",
     providerId: data.settings.activeProviderId,
-    qualityMode: 'standard',
-  })
-  const [planning, setPlanning] = useState(false)
-  const [planningStage, setPlanningStage] = useState(0)
-  const [error, setError] = useState('')
-  const abortRef = useRef<AbortController | null>(null)
-  const provider = data.settings.providers.find((item) => item.id === request.providerId)
+    qualityMode: "standard",
+  });
+  const [planning, setPlanning] = useState(false);
+  const [planningStage, setPlanningStage] = useState(0);
+  const [error, setError] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
+  const provider = data.settings.providers.find(
+    (item) => item.id === request.providerId,
+  );
 
-  const qualityModes: Array<{ id: AiNovelRequest['qualityMode']; name: string; caption: string; stages: string }> = [
-    { id: 'draft', name: '快速初稿', caption: '每章 1 次生成', stages: '大纲规划 → 分章写作' },
-    { id: 'standard', name: '标准成稿', caption: '每章约 3 次调用', stages: '写作 → 审稿 → 系统修订' },
-    { id: 'fanqie', name: '番茄发布版', caption: '每章约 4 次调用', stages: '写作 → 审稿 → 修订 → 番茄终审' },
-  ]
+  const qualityModes: Array<{
+    id: AiNovelRequest["qualityMode"];
+    name: string;
+    caption: string;
+    stages: string;
+  }> = [
+    {
+      id: "draft",
+      name: "快速初稿",
+      caption: "每章 1 次生成",
+      stages: "大纲规划 → 分章写作",
+    },
+    {
+      id: "standard",
+      name: "标准成稿",
+      caption: "每章约 3 次调用",
+      stages: "写作 → 审稿 → 系统修订",
+    },
+  ];
 
-  useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => () => abortRef.current?.abort(), []);
   useEffect(() => {
-    if (!planning) return
-    setPlanningStage(0)
-    const timer = window.setInterval(() => setPlanningStage((current) => Math.min(3, current + 1)), 1150)
-    return () => window.clearInterval(timer)
-  }, [planning])
-  const patch = <K extends keyof AiNovelRequest>(key: K, value: AiNovelRequest[K]) => setRequest((current) => ({ ...current, [key]: value }))
+    if (!planning) return;
+    setPlanningStage(0);
+    const timer = window.setInterval(
+      () => setPlanningStage((current) => Math.min(3, current + 1)),
+      1150,
+    );
+    return () => window.clearInterval(timer);
+  }, [planning]);
+  const patch = <K extends keyof AiNovelRequest>(
+    key: K,
+    value: AiNovelRequest[K],
+  ) => setRequest((current) => ({ ...current, [key]: value }));
   const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!request.idea.trim() || !provider || planning) return
-    if (!provider.apiKey.trim()) return setError(`请先填写 ${provider.name} API Key`)
-    setPlanningStage(0)
-    setPlanning(true)
-    setError('')
-    const controller = new AbortController()
-    abortRef.current = controller
+    event.preventDefault();
+    if (!request.idea.trim() || !provider || planning) return;
+    if (!provider.apiKey.trim())
+      return setError(`请先填写 ${provider.name} API Key`);
+    const safeRequest = normalizeAiNovelRequest(request);
+    setPlanningStage(0);
+    setPlanning(true);
+    setError("");
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const plan = await generateNovelPlan(provider, request, controller.signal, (usage) => onUsage(usage, provider))
-      onCreate(plan, request)
+      const plan = await generateNovelPlan(
+        provider,
+        safeRequest,
+        controller.signal,
+        (usage) => onUsage(usage, provider),
+      );
+      onCreate(plan, safeRequest);
     } catch (reason) {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : '生成大纲失败')
+      if (!controller.signal.aborted)
+        setError(reason instanceof Error ? reason.message : "生成大纲失败");
     } finally {
-      setPlanning(false)
-      abortRef.current = null
+      setPlanning(false);
+      abortRef.current = null;
     }
-  }
+  };
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !planning) onClose() }}>
-      <form className="dialog ai-create-dialog" onSubmit={(event) => void submit(event)}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !planning) onClose();
+      }}
+    >
+      <form
+        className="dialog ai-create-dialog"
+        onSubmit={(event) => void submit(event)}
+      >
         <div className="dialog-head ai-create-head">
-          <div><span className="dialog-icon"><Sparkles size={20} /></span><span><h2>AI 一键创作</h2><p>从一个想法生成设定、大纲和全书正文</p></span></div>
-          <button type="button" className="icon-button" onClick={onClose} disabled={planning} aria-label="关闭"><X size={19} /></button>
-        </div>
-        {planning && provider ? <CreationPlanningOverlay provider={provider} request={request} stage={planningStage} onCancel={() => abortRef.current?.abort()} /> : <>
-        <div className="dialog-body ai-create-body">
-          <Field label="核心创意">
-            <textarea autoFocus value={request.idea} onChange={(event) => patch('idea', event.target.value)} rows={5} placeholder="例如：一个专门替死者投递遗书的快递员，收到了一封写给自己的信……" />
-          </Field>
-
-          <div className="create-form-grid">
-            <Field label="题材">
-              <select value={request.genre} onChange={(event) => patch('genre', event.target.value)}>
-                {['都市悬疑', '玄幻修仙', '现代言情', '古代言情', '科幻未来', '历史架空', '规则怪谈', '现实题材'].map((genre) => <option key={genre}>{genre}</option>)}
-              </select>
-            </Field>
-            <Field label="AI 模型">
-              <select value={request.providerId} onChange={(event) => patch('providerId', event.target.value)}>
-                {data.settings.providers.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.model}</option>)}
-              </select>
-            </Field>
-            <Field label="章节数">
-              <input type="number" min="3" max="100" value={request.chapterCount} onChange={(event) => patch('chapterCount', Math.min(100, Math.max(3, Number(event.target.value) || 3)))} />
-            </Field>
-            <Field label="每章目标字数">
-              <input type="number" min="1000" max="5000" step="100" value={request.wordsPerChapter} onChange={(event) => patch('wordsPerChapter', Math.min(5000, Math.max(1000, Number(event.target.value) || 1000)))} />
-            </Field>
+          <div>
+            <span className="dialog-icon">
+              <Sparkles size={20} />
+            </span>
+            <span>
+              <h2>AI 一键创作</h2>
+              <p>从一个想法生成设定、大纲和全书正文</p>
+            </span>
           </div>
-
-          <Field label="文风">
-            <input value={request.style} onChange={(event) => patch('style', event.target.value)} placeholder="叙事视角、节奏、语言气质" />
-          </Field>
-          <Field label="额外约束">
-            <textarea value={request.constraints} onChange={(event) => patch('constraints', event.target.value)} rows={2} placeholder="主角限制、感情线、结局方向、禁止内容……" />
-          </Field>
-
-          <fieldset className="quality-fieldset">
-            <legend>质量流程</legend>
-            <div className="quality-options">
-              {qualityModes.map((mode) => (
-                <label className={`quality-option ${request.qualityMode === mode.id ? 'active' : ''}`} key={mode.id}>
-                  <input type="radio" name="quality" value={mode.id} checked={request.qualityMode === mode.id} onChange={() => patch('qualityMode', mode.id)} />
-                  <span><strong>{mode.name}</strong><small>{mode.caption}</small><em>{mode.stages}</em></span>
-                  <i>{request.qualityMode === mode.id ? <Check size={13} /> : null}</i>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          {!provider?.apiKey ? <div className="api-key-notice"><ShieldCheck size={16} /><span>当前模型尚未配置 API Key</span><button type="button" onClick={onOpenSettings}>前往设置</button></div> : null}
-          {error ? <div className="ai-error create-error">{error}</div> : null}
-        </div>
-        <div className="dialog-actions ai-create-actions">
-          <button type="button" className="text-button" onClick={onManual} disabled={planning}>手动创建空白项目</button>
-          <span />
-          <button type="button" className="secondary-button" onClick={onClose} disabled={planning}>取消</button>
-          <button type="submit" className="primary-button generate-book-button" disabled={!request.idea.trim() || planning || !provider?.apiKey}>
-            {planning ? <><LoaderCircle className="spin" size={17} />正在规划全书</> : <><Sparkles size={17} />生成整部小说</>}
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            disabled={planning}
+            aria-label="关闭"
+          >
+            <X size={19} />
           </button>
         </div>
-        </>}
+        {planning && provider ? (
+          <CreationPlanningOverlay
+            provider={provider}
+            request={request}
+            stage={planningStage}
+            onCancel={() => abortRef.current?.abort()}
+          />
+        ) : (
+          <>
+            <div className="dialog-body ai-create-body">
+              <Field label="核心创意">
+                <textarea
+                  autoFocus
+                  value={request.idea}
+                  onChange={(event) => patch("idea", event.target.value)}
+                  maxLength={12000}
+                  rows={5}
+                  placeholder="例如：一个专门替死者投递遗书的快递员，收到了一封写给自己的信……"
+                />
+              </Field>
+
+              <div className="create-form-grid">
+                <Field label="题材">
+                  <select
+                    value={request.genre}
+                    onChange={(event) => patch("genre", event.target.value)}
+                  >
+                    {[
+                      "都市悬疑",
+                      "玄幻修仙",
+                      "现代言情",
+                      "古代言情",
+                      "科幻未来",
+                      "历史架空",
+                      "规则怪谈",
+                      "现实题材",
+                    ].map((genre) => (
+                      <option key={genre}>{genre}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="AI 模型">
+                  <select
+                    value={request.providerId}
+                    onChange={(event) =>
+                      patch("providerId", event.target.value)
+                    }
+                  >
+                    {data.settings.providers.map((item) => (
+                      <option value={item.id} key={item.id}>
+                        {item.name} · {item.model}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="章节数">
+                  <input
+                    type="number"
+                    min="3"
+                    max="100"
+                    value={request.chapterCount}
+                    onChange={(event) =>
+                      patch(
+                        "chapterCount",
+                        Math.min(
+                          100,
+                          Math.max(3, Number(event.target.value) || 3),
+                        ),
+                      )
+                    }
+                  />
+                </Field>
+                <Field label="每章目标字数">
+                  <input
+                    type="number"
+                    min="1000"
+                    max="5000"
+                    step="100"
+                    value={request.wordsPerChapter}
+                    onChange={(event) =>
+                      patch(
+                        "wordsPerChapter",
+                        Math.min(
+                          5000,
+                          Math.max(1000, Number(event.target.value) || 1000),
+                        ),
+                      )
+                    }
+                  />
+                </Field>
+              </div>
+
+              <Field label="文风">
+                <input
+                  value={request.style}
+                  onChange={(event) => patch("style", event.target.value)}
+                  maxLength={1200}
+                  placeholder="叙事视角、节奏、语言气质"
+                />
+              </Field>
+              <Field label="额外约束">
+                <textarea
+                  value={request.constraints}
+                  onChange={(event) => patch("constraints", event.target.value)}
+                  maxLength={12000}
+                  rows={2}
+                  placeholder="主角限制、感情线、结局方向、禁止内容……"
+                />
+              </Field>
+
+              <fieldset className="quality-fieldset">
+                <legend>质量流程</legend>
+                <div className="quality-options">
+                  {qualityModes.map((mode) => (
+                    <label
+                      className={`quality-option ${request.qualityMode === mode.id ? "active" : ""}`}
+                      key={mode.id}
+                    >
+                      <input
+                        type="radio"
+                        name="quality"
+                        value={mode.id}
+                        checked={request.qualityMode === mode.id}
+                        onChange={() => patch("qualityMode", mode.id)}
+                      />
+                      <span>
+                        <strong>{mode.name}</strong>
+                        <small>{mode.caption}</small>
+                        <em>{mode.stages}</em>
+                      </span>
+                      <i>
+                        {request.qualityMode === mode.id ? (
+                          <Check size={13} />
+                        ) : null}
+                      </i>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              {!provider?.apiKey ? (
+                <div className="api-key-notice">
+                  <ShieldCheck size={16} />
+                  <span>当前模型尚未配置 API Key</span>
+                  <button type="button" onClick={onOpenSettings}>
+                    前往设置
+                  </button>
+                </div>
+              ) : null}
+              {error ? (
+                <div className="ai-error create-error">{error}</div>
+              ) : null}
+            </div>
+            <div className="dialog-actions ai-create-actions">
+              <button
+                type="button"
+                className="text-button"
+                onClick={onManual}
+                disabled={planning}
+              >
+                手动创建空白项目
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                onClick={onImportTxt}
+                disabled={planning}
+              >
+                导入本地书
+              </button>
+              <span />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onClose}
+                disabled={planning}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="primary-button generate-book-button"
+                disabled={!request.idea.trim() || planning || !provider?.apiKey}
+              >
+                {planning ? (
+                  <>
+                    <LoaderCircle className="spin" size={17} />
+                    正在规划全书
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={17} />
+                    生成整部小说
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        )}
       </form>
     </div>
-  )
+  );
 }
 
 const creationStages = [
-  { title: '解析故事核心', caption: '提炼人物欲望、冲突与世界基线' },
-  { title: '建立世界与角色', caption: '让关系、规则和伏笔彼此咬合' },
-  { title: '编排章节节拍', caption: '为每一章安排目标、阻力与钩子' },
-  { title: '写入创作工作台', caption: '正在准备逐章生成与质量流程' },
-]
+  { title: "解析故事核心", caption: "提炼人物欲望、冲突与世界基线" },
+  { title: "建立世界与角色", caption: "让关系、规则和伏笔彼此咬合" },
+  { title: "编排章节节拍", caption: "为每一章安排目标、阻力与钩子" },
+  { title: "写入创作工作台", caption: "正在准备逐章生成与质量流程" },
+];
 
 function CreationPlanningOverlay({
   provider,
@@ -2362,60 +6951,675 @@ function CreationPlanningOverlay({
   stage,
   onCancel,
 }: {
-  provider: AppData['settings']['providers'][number]
-  request: AiNovelRequest
-  stage: number
-  onCancel: () => void
+  provider: AppData["settings"]["providers"][number];
+  request: AiNovelRequest;
+  stage: number;
+  onCancel: () => void;
 }) {
-  const qualityLabel = request.qualityMode === 'fanqie' ? '番茄发布版' : request.qualityMode === 'standard' ? '标准成稿' : '快速初稿'
-  const currentStage = creationStages[stage]
+  const qualityLabel =
+    request.qualityMode === "standard" ? "标准成稿" : "快速初稿";
+  const currentStage = creationStages[stage];
   return (
-    <section className="creation-planning" aria-live="polite" aria-label="正在规划全书">
+    <section
+      className="creation-planning"
+      aria-live="polite"
+      aria-label="正在规划全书"
+    >
       <div className="creation-writing-scene" aria-hidden="true">
-        <div className="creation-paper-sheet"><i /><i /><i /><i /><i /></div>
+        <div className="creation-paper-sheet">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
         <div className="creation-ink-line" />
-        <span className="creation-feather"><Feather size={37} /></span>
-        <span className="creation-ink-dot dot-one" /><span className="creation-ink-dot dot-two" /><span className="creation-ink-dot dot-three" />
+        <span className="creation-feather">
+          <Feather size={37} />
+        </span>
+        <span className="creation-ink-dot dot-one" />
+        <span className="creation-ink-dot dot-two" />
+        <span className="creation-ink-dot dot-three" />
       </div>
       <div className="creation-planning-copy">
-        <span className="creation-eyebrow"><span />INKFORGE STORY ENGINE</span>
-        <h2>正在为你的故事<br /><em>落下第一笔。</em></h2>
+        <span className="creation-eyebrow">
+          <span />
+          INKFORGE STORY ENGINE
+        </span>
+        <h2>
+          正在为你的故事
+          <br />
+          <em>落下第一笔。</em>
+        </h2>
         <p>{currentStage.caption}</p>
       </div>
       <div className="creation-model-card">
         <span className="creation-model-label">本次使用模型</span>
-        <div><ProviderMark id={provider.id} /><span><strong>{provider.name}</strong><small>{provider.model}</small></span><i><Bot size={14} />在线</i></div>
-        <small className="creation-quality">{qualityLabel} · {request.chapterCount} 章 · 每章约 {request.wordsPerChapter.toLocaleString()} 字</small>
+        <div>
+          <ProviderMark id={provider.id} />
+          <span>
+            <strong>{provider.name}</strong>
+            <small>{provider.model}</small>
+          </span>
+          <i>
+            <Bot size={14} />
+            在线
+          </i>
+        </div>
+        <small className="creation-quality">
+          {qualityLabel} · {request.chapterCount} 章 · 每章约{" "}
+          {request.wordsPerChapter.toLocaleString()} 字
+        </small>
       </div>
       <div className="creation-stage-list">
-        {creationStages.map((item, index) => <div className={`creation-stage ${index < stage ? 'done' : index === stage ? 'active' : ''}`} key={item.title}><span>{index < stage ? <Check size={12} /> : String(index + 1).padStart(2, '0')}</span><strong>{item.title}</strong><i /></div>)}
+        {creationStages.map((item, index) => (
+          <div
+            className={`creation-stage ${index < stage ? "done" : index === stage ? "active" : ""}`}
+            key={item.title}
+          >
+            <span>
+              {index < stage ? (
+                <Check size={12} />
+              ) : (
+                String(index + 1).padStart(2, "0")
+              )}
+            </span>
+            <strong>{item.title}</strong>
+            <i />
+          </div>
+        ))}
       </div>
-      <div className="creation-planning-foot"><span><LoaderCircle className="spin" size={14} />{currentStage.title}</span><button type="button" onClick={onCancel}>停止规划</button></div>
+      <div className="creation-planning-foot">
+        <span>
+          <LoaderCircle className="spin" size={14} />
+          {currentStage.title}
+        </span>
+        <button type="button" onClick={onCancel}>
+          停止规划
+        </button>
+      </div>
     </section>
-  )
+  );
 }
 
-function NewProjectDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (title: string, genre: string, synopsis: string) => void }) {
-  const [title, setTitle] = useState('')
-  const [genre, setGenre] = useState('')
-  const [synopsis, setSynopsis] = useState('')
+function NewProjectDialog({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (title: string, genre: string, synopsis: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [genre, setGenre] = useState("");
+  const [synopsis, setSynopsis] = useState("");
   const submit = (event: FormEvent) => {
-    event.preventDefault()
-    if (title.trim()) onCreate(title, genre, synopsis)
-  }
+    event.preventDefault();
+    if (title.trim()) onCreate(title, genre, synopsis);
+  };
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <form className="dialog" onSubmit={submit}>
-        <div className="dialog-head"><div><span className="dialog-icon"><BookOpenText size={20} /></span><span><h2>开始一部新小说</h2><p>随时可以在设置中修改这些信息</p></span></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={19} /></button></div>
-        <div className="dialog-body">
-          <Field label="小说名称"><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：雾城来信" /></Field>
-          <Field label="作品类型"><input value={genre} onChange={(event) => setGenre(event.target.value)} placeholder="悬疑、都市、科幻……" /></Field>
-          <Field label="一句话简介"><textarea value={synopsis} onChange={(event) => setSynopsis(event.target.value)} rows={3} placeholder="主角是谁，他/她想要什么，又将面对什么？" /></Field>
+        <div className="dialog-head">
+          <div>
+            <span className="dialog-icon">
+              <BookOpenText size={20} />
+            </span>
+            <span>
+              <h2>开始一部新小说</h2>
+              <p>随时可以在设置中修改这些信息</p>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="关闭"
+          >
+            <X size={19} />
+          </button>
         </div>
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={!title.trim()}><Plus size={17} />创建小说</button></div>
+        <div className="dialog-body">
+          <Field label="小说名称">
+            <input
+              autoFocus
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="例如：雾城来信"
+            />
+          </Field>
+          <Field label="作品类型">
+            <input
+              value={genre}
+              onChange={(event) => setGenre(event.target.value)}
+              placeholder="悬疑、都市、科幻……"
+            />
+          </Field>
+          <Field label="一句话简介">
+            <textarea
+              value={synopsis}
+              onChange={(event) => setSynopsis(event.target.value)}
+              rows={3}
+              placeholder="主角是谁，他/她想要什么，又将面对什么？"
+            />
+          </Field>
+        </div>
+        <div className="dialog-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={!title.trim()}
+          >
+            <Plus size={17} />
+            创建小说
+          </button>
+        </div>
       </form>
     </div>
-  )
+  );
 }
 
-export default App
+function ImportTxtDialog({
+  data,
+  onClose,
+  onCreate,
+  onToast,
+  onOpenSettings,
+  onExtractLore,
+}: {
+  data: AppData;
+  onClose: () => void;
+  onCreate: (project: NovelProject, loreApplied?: boolean) => void;
+  onToast: (message: string) => void;
+  onOpenSettings: () => void;
+  onExtractLore: (
+    project: NovelProject,
+    signal?: AbortSignal,
+  ) => Promise<NovelProject>;
+}) {
+  const [title, setTitle] = useState("");
+  const [genre, setGenre] = useState("导入");
+  const [fileName, setFileName] = useState("");
+  const [fileKind, setFileKind] = useState<"txt" | "epub" | "">("");
+  const [fileBytes, setFileBytes] = useState(0);
+  const [chapters, setChapters] = useState<TxtChapterSlice[]>([]);
+  const [asSingle, setAsSingle] = useState(false);
+  const [extractWithAi, setExtractWithAi] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const rawTextRef = useRef("");
+  const epubChaptersRef = useRef<TxtChapterSlice[]>([]);
+  const splitAbortRef = useRef<AbortController | null>(null);
+  const PREVIEW_LIMIT = 80;
+
+  const activeProvider =
+    data.settings.providers.find(
+      (item) => item.id === data.settings.activeProviderId,
+    ) ?? data.settings.providers[0];
+  const canExtract =
+    Boolean(activeProvider?.apiKey.trim()) &&
+    Boolean(activeProvider?.model.trim());
+
+  useEffect(
+    () => () => {
+      splitAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  const applyTxtSplit = async (text: string, single: boolean) => {
+    splitAbortRef.current?.abort();
+    const controller = new AbortController();
+    splitAbortRef.current = controller;
+    setLoading(true);
+    setError("");
+    setProgress(0);
+    setStatus(single ? "正在整理全文…" : "正在异步分章…");
+    try {
+      if (single) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        if (controller.signal.aborted) return;
+        const content = text.replace(/^\uFEFF/, "").trim();
+        setChapters(
+          content
+            ? [{ title: "第1章", content, words: estimateWordsFast(content) }]
+            : [],
+        );
+        setProgress(1);
+        return;
+      }
+      const next = await splitTxtIntoChaptersAsync(text, {
+        signal: controller.signal,
+        onProgress: setProgress,
+      });
+      if (controller.signal.aborted) return;
+      setChapters(next);
+    } catch (reason) {
+      if (
+        controller.signal.aborted ||
+        (reason instanceof DOMException && reason.name === "AbortError")
+      )
+        return;
+      setChapters([]);
+      setError(reason instanceof Error ? reason.message : "分章失败");
+      onToast("分章失败");
+    } finally {
+      if (splitAbortRef.current === controller) {
+        splitAbortRef.current = null;
+        setLoading(false);
+        setStatus("");
+      }
+    }
+  };
+
+  const applyEpubChapters = (spineChapters: TxtChapterSlice[], single: boolean) => {
+    if (single) {
+      const content = spineChapters
+        .map((chapter) => {
+          const heading = chapter.title.trim();
+          const body = chapter.content.trim();
+          return body ? `${heading}\n\n${body}` : heading;
+        })
+        .filter(Boolean)
+        .join("\n\n")
+        .trim();
+      setChapters(
+        content
+          ? [{ title: "第1章", content, words: estimateWordsFast(content) }]
+          : [],
+      );
+      return;
+    }
+    setChapters(spineChapters);
+  };
+
+  const onPickFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const lowerName = file.name.toLowerCase();
+    const kind = isEpubFileName(lowerName)
+      ? "epub"
+      : isTxtFileName(lowerName) ||
+          file.type === "text/plain" ||
+          !lowerName.includes(".")
+        ? "txt"
+        : "";
+    if (!kind) {
+      setError("仅支持 TXT 或 EPUB 文件");
+      onToast("仅支持 TXT 或 EPUB");
+      return;
+    }
+
+    const risk = describeTxtFileRisk(file.size);
+    if (file.size >= TXT_CONFIRM_BYTES) {
+      const confirmed = window.confirm(`${risk.message}\n\n确定继续导入吗？`);
+      if (!confirmed) return;
+    }
+
+    splitAbortRef.current?.abort();
+    const controller = new AbortController();
+    splitAbortRef.current = controller;
+
+    setLoading(true);
+    setError("");
+    setChapters([]);
+    setProgress(0);
+    setStatus(kind === "epub" ? "正在解析 EPUB…" : "正在读取文件…");
+    setFileBytes(file.size);
+    setFileKind(kind);
+    rawTextRef.current = "";
+    epubChaptersRef.current = [];
+
+    try {
+      if (kind === "epub") {
+        const parsed = await parseEpubFile(file, {
+          signal: controller.signal,
+          onProgress: setProgress,
+        });
+        if (controller.signal.aborted) return;
+        epubChaptersRef.current = parsed.chapters;
+        setFileName(file.name);
+        if (!title.trim()) setTitle(parsed.title || titleFromFileName(file.name));
+        applyEpubChapters(parsed.chapters, asSingle);
+        setProgress(1);
+      } else {
+        const text = await readTxtFile(file);
+        if (controller.signal.aborted) return;
+        rawTextRef.current = text;
+        setFileName(file.name);
+        if (!title.trim()) setTitle(titleFromFileName(file.name));
+        await applyTxtSplit(text, asSingle);
+        return;
+      }
+    } catch (reason) {
+      if (
+        controller.signal.aborted ||
+        (reason instanceof DOMException && reason.name === "AbortError")
+      )
+        return;
+      setError(reason instanceof Error ? reason.message : "读取文件失败");
+      onToast(kind === "epub" ? "读取 EPUB 失败" : "读取 TXT 失败");
+    } finally {
+      if (splitAbortRef.current === controller) {
+        splitAbortRef.current = null;
+        setLoading(false);
+        setStatus("");
+      }
+    }
+  };
+
+  const toggleSingle = (single: boolean) => {
+    setAsSingle(single);
+    if (fileKind === "epub" && epubChaptersRef.current.length) {
+      applyEpubChapters(epubChaptersRef.current, single);
+      return;
+    }
+    if (fileKind === "txt" && rawTextRef.current) {
+      void applyTxtSplit(rawTextRef.current, single);
+    }
+  };
+
+  const summary = summarizeTxtChapters(chapters);
+  const fileRisk = fileBytes ? describeTxtFileRisk(fileBytes) : null;
+  const previewChapters = chapters.slice(0, PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, chapters.length - PREVIEW_LIMIT);
+  const busy = loading || importing;
+  const loreSampleHint = chapters.length
+    ? buildImportLoreSample(chapters)
+    : null;
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim() || !chapters.length || busy) return;
+    if (extractWithAi && !canExtract) {
+      setError("启用 AI 提炼前，请先配置 API Key");
+      onToast("请先配置 API Key");
+      return;
+    }
+    splitAbortRef.current?.abort();
+    const controller = new AbortController();
+    splitAbortRef.current = controller;
+    setImporting(true);
+    setProgress(0);
+    try {
+      setStatus("正在写入作品…");
+      let project = await createProjectFromTxtAsync(title, chapters, genre, {
+        signal: controller.signal,
+        onProgress: (ratio) => setProgress(ratio * (extractWithAi ? 0.45 : 1)),
+      });
+      if (controller.signal.aborted) return;
+
+      let loreApplied = false;
+      if (extractWithAi) {
+        setStatus("正在抽样并提炼设定（非全书扫描）…");
+        setProgress(0.5);
+        project = await onExtractLore(project, controller.signal);
+        if (controller.signal.aborted) return;
+        loreApplied = true;
+        setProgress(1);
+      }
+
+      onCreate(project, loreApplied);
+    } catch (reason) {
+      if (
+        controller.signal.aborted ||
+        (reason instanceof DOMException && reason.name === "AbortError")
+      )
+        return;
+      setError(reason instanceof Error ? reason.message : "导入失败");
+      onToast(extractWithAi ? "导入或设定提炼失败" : "导入失败");
+    } finally {
+      if (splitAbortRef.current === controller) splitAbortRef.current = null;
+      setImporting(false);
+      setStatus("");
+    }
+  };
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <form
+        className="dialog import-txt-dialog"
+        onSubmit={(event) => void submit(event)}
+      >
+        <div className="dialog-head">
+          <div>
+            <span className="dialog-icon">
+              <Import size={20} />
+            </span>
+            <span>
+              <h2>导入本地书</h2>
+              <p>
+                支持 TXT / EPUB，分章导入，可选 AI 抽样提炼角色 / 世界观 / 情节 /
+                时间线
+              </p>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="关闭"
+          >
+            <X size={19} />
+          </button>
+        </div>
+        <div className="dialog-body">
+          <div className="import-txt-pick">
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".txt,.epub,text/plain,application/epub+zip"
+              hidden
+              onChange={(event) => void onPickFile(event)}
+            />
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {loading ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <FileText size={16} />
+              )}
+              {fileName || "选择 TXT / EPUB 文件"}
+            </button>
+            {fileName ? (
+              <small>
+                {fileKind === "epub" ? "EPUB" : "TXT"} · {summary.chapterCount}{" "}
+                章 · 约 {summary.totalWords.toLocaleString()} 字
+                {fileBytes ? ` · ${formatFileMeta(fileBytes)}` : ""}
+              </small>
+            ) : (
+              <small>
+                TXT 支持 UTF-8 / GBK · EPUB 按目录阅读顺序分章 · 大文件异步处理
+              </small>
+            )}
+          </div>
+
+          {fileRisk && fileRisk.level !== "ok" ? (
+            <p className={`import-txt-warning ${fileRisk.level}`}>
+              {fileRisk.message}
+            </p>
+          ) : null}
+
+          <Field label="小说名称">
+            <input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="从文件名或 EPUB 元数据自动填充"
+              disabled={busy}
+            />
+          </Field>
+          <Field label="作品类型">
+            <input
+              value={genre}
+              onChange={(event) => setGenre(event.target.value)}
+              placeholder="导入、穿越、玄幻……"
+              disabled={busy}
+            />
+          </Field>
+
+          <div className="import-split-mode" role="group" aria-label="分章方式">
+            <button
+              type="button"
+              className={!asSingle ? "active" : ""}
+              disabled={busy}
+              onClick={() => toggleSingle(false)}
+            >
+              {fileKind === "epub" ? "按 EPUB 章节" : "自动分章"}
+            </button>
+            <button
+              type="button"
+              className={asSingle ? "active" : ""}
+              disabled={busy}
+              onClick={() => toggleSingle(true)}
+            >
+              整篇一章
+            </button>
+          </div>
+
+          <label
+            className={`import-ai-extract ${extractWithAi ? "active" : ""}`}
+          >
+            <input
+              type="checkbox"
+              checked={extractWithAi}
+              disabled={busy}
+              onChange={(event) => setExtractWithAi(event.target.checked)}
+            />
+            <span>
+              <strong>
+                <Sparkles size={14} />
+                导入后用 AI 提炼设定
+              </strong>
+              <small>
+                仅发送目录 + 开篇/中段/结尾抽样
+                {loreSampleHint
+                  ? `（约 ${loreSampleHint.charCount.toLocaleString()} 字，抽样 ${loreSampleHint.sampledChapterIndexes.length} 章）`
+                  : ""}
+                ，写入角色、世界观、情节与时间线。不扫描全书。
+              </small>
+            </span>
+          </label>
+
+          {extractWithAi && !canExtract ? (
+            <div className="api-key-notice">
+              <ShieldCheck size={16} />
+              <span>当前模型尚未配置 API Key</span>
+              <button type="button" onClick={onOpenSettings}>
+                前往设置
+              </button>
+            </div>
+          ) : null}
+
+          {busy ? (
+            <div className="import-txt-progress" aria-live="polite">
+              <div className="import-txt-progress-bar">
+                <i
+                  style={{
+                    width: `${Math.max(6, Math.round(progress * 100))}%`,
+                  }}
+                />
+              </div>
+              <small>
+                {status || "处理中…"}
+                {progress > 0 ? ` · ${Math.round(progress * 100)}%` : ""}
+              </small>
+            </div>
+          ) : null}
+
+          {error ? <p className="import-txt-error">{error}</p> : null}
+
+          {chapters.length ? (
+            <div className="import-chapter-preview" aria-label="章节预览">
+              {previewChapters.map((chapter, index) => (
+                <div
+                  className="import-chapter-row"
+                  key={`${chapter.title}-${index}`}
+                >
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <strong>{chapter.title}</strong>
+                  <small>{(chapter.words ?? 0).toLocaleString()} 字</small>
+                </div>
+              ))}
+              {hiddenCount ? (
+                <div className="import-chapter-more">
+                  还有 {hiddenCount} 章未在预览中列出，导入后可在大纲中查看全部
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="import-txt-empty">
+              选择 TXT 或 EPUB 后，这里会预览识别到的章节
+            </div>
+          )}
+        </div>
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={
+              !title.trim() ||
+              !chapters.length ||
+              busy ||
+              (extractWithAi && !canExtract)
+            }
+          >
+            {importing ? (
+              <LoaderCircle className="spin" size={17} />
+            ) : extractWithAi ? (
+              <Sparkles size={17} />
+            ) : (
+              <Import size={17} />
+            )}
+            {importing
+              ? status.includes("提炼")
+                ? "正在提炼设定…"
+                : "正在导入…"
+              : extractWithAi
+                ? "导入并提炼设定"
+                : "导入并打开"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function formatFileMeta(bytes: number) {
+  const risk = describeTxtFileRisk(bytes);
+  return risk.message.replace(/^文件约 /, "");
+}
+
+export default App;

@@ -408,7 +408,6 @@ for (const target of [
 
 await page.getByRole('button', { name: '设置', exact: true }).click()
 await page.getByText('webnovel-plan', { exact: false }).waitFor()
-await page.getByText('fanqie-audit', { exact: false }).waitFor()
 await page.locator('.provider-choice.current.selected', { hasText: 'Kimi' }).waitFor()
 if (await page.locator('.toast').count()) await page.locator('.toast').waitFor({ state: 'detached' })
 await page.screenshot({ path: 'qa/desktop-settings.png', fullPage: true })
