@@ -11,6 +11,8 @@ import {
   Check,
   Clock3,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleUserRound,
   Download,
   Eye,
@@ -119,6 +121,7 @@ import {
   assessSeasoningDraft,
   estimateContextBudget,
   type SeasoningDraft,
+  type SeasoningHit,
 } from "./seasoning";
 import { exportData, loadData, parseImport, saveData } from "./storage";
 import {
@@ -174,6 +177,8 @@ import {
   buildReviewPrompt,
   buildRevisionPrompt,
   buildSeasoningEnrichInstruction,
+  buildSeasoningHitAdvicePrompt,
+  buildSeasoningHitRewritePrompt,
   buildSettingGapPrompt,
   buildStyleFingerprintPrompt,
   buildWeakChapterRewritePrompt,
@@ -1865,6 +1870,231 @@ function App() {
     };
   };
 
+  const buildHitPromptInput = (
+    project: NovelProject,
+    chapter: Chapter,
+    hit: SeasoningHit,
+    options?: { authorDraft?: string; advice?: string },
+  ) => {
+    const signal =
+      (project.seasoningSignals ?? []).find((item) => item.id === hit.signalId) ??
+      null;
+    const scene = hit.sceneId
+      ? (project.seasoningScenes ?? []).find((item) => item.id === hit.sceneId)
+      : null;
+    const rulesText = (project.seasoningRules ?? [])
+      .map(
+        (item) =>
+          `${item.title}[${item.category}]：${item.content}`,
+      )
+      .join("\n");
+    return {
+      chapterTitle: chapter.title,
+      matchedText: hit.matchedText,
+      excerpt: hit.excerpt,
+      signalTitle: signal?.title || hit.signalTitle || "手动选中",
+      signalContent:
+        signal?.content ||
+        "作者在正文中手动选中了该片段，请针对选中原文加料。",
+      signalCategory: signal?.category || "手动选区",
+      sceneTitle: scene?.title,
+      sceneContent: scene?.content,
+      rulesText,
+      authorDraft: options?.authorDraft,
+      advice: options?.advice,
+    };
+  };
+
+  const adviseSeasoningHit = async (
+    project: NovelProject,
+    chapter: Chapter,
+    hit: SeasoningHit,
+    authorDraft: string,
+    options?: {
+      signal?: AbortSignal;
+      onChunk?: (chunk: string) => void;
+    },
+  ) => {
+    const provider = resolveActiveProvider();
+    if (!hit.excerpt.trim()) throw new Error("请先选中要加料的正文");
+    const draft = authorDraft.trim();
+    if (!draft) throw new Error("请先填写你的加料说明");
+    const latest =
+      dataRef.current.projects.find((item) => item.id === project.id) ?? project;
+    const liveChapter =
+      latest.chapters.find((item) => item.id === chapter.id) ?? chapter;
+    let answer = "";
+    const usage = await streamChat({
+      provider,
+      project: latest,
+      chapterTitle: liveChapter.title,
+      chapterContent: liveChapter.content,
+      chapterContextLimit: 1200,
+      interactionMode: "chat",
+      signal: options?.signal,
+      messages: [
+        {
+          role: "user",
+          content: buildSeasoningHitAdvicePrompt(
+            latest,
+            buildHitPromptInput(latest, liveChapter, hit, {
+              authorDraft: draft,
+            }),
+          ),
+        },
+      ],
+      onChunk: (chunk) => {
+        answer += chunk;
+        options?.onChunk?.(chunk);
+      },
+    });
+    if (options?.signal?.aborted)
+      throw new DOMException("Aborted", "AbortError");
+    const cleaned = answer.trim();
+    if (!cleaned) throw new Error("未返回润色后的加料说明");
+    recordUsage(
+      project.id,
+      provider,
+      usage,
+      "toolkit",
+      countWords(cleaned),
+      liveChapter.id,
+    );
+    return cleaned;
+  };
+
+  const rewriteSeasoningHit = async (
+    project: NovelProject,
+    chapter: Chapter,
+    hit: SeasoningHit,
+    advice: string | undefined,
+    options?: {
+      signal?: AbortSignal;
+      onChunk?: (chunk: string) => void;
+    },
+  ) => {
+    const provider = resolveActiveProvider();
+    if (!String(advice || "").trim()) {
+      throw new Error("请先填写或润色加料说明后再改写");
+    }
+    const latest =
+      dataRef.current.projects.find((item) => item.id === project.id) ?? project;
+    const liveChapter =
+      latest.chapters.find((item) => item.id === chapter.id) ?? chapter;
+    let answer = "";
+    const usage = await streamChat({
+      provider,
+      project: latest,
+      chapterTitle: liveChapter.title,
+      chapterContent: liveChapter.content,
+      chapterContextLimit: 1200,
+      interactionMode: "revision",
+      signal: options?.signal,
+      messages: [
+        {
+          role: "user",
+          content: buildSeasoningHitRewritePrompt(
+            latest,
+            buildHitPromptInput(latest, liveChapter, hit, {
+              advice: advice?.trim(),
+            }),
+          ),
+        },
+      ],
+      onChunk: (chunk) => {
+        answer += chunk;
+        options?.onChunk?.(chunk);
+      },
+    });
+    if (options?.signal?.aborted)
+      throw new DOMException("Aborted", "AbortError");
+    const cleaned = answer
+      .trim()
+      .replace(/^```(?:text|markdown)?\s*/i, "")
+      .replace(/\s*```$/, "")
+      .trim();
+    if (!cleaned) throw new Error("未返回局部改写");
+    recordUsage(
+      project.id,
+      provider,
+      usage,
+      "toolkit",
+      countWords(cleaned),
+      liveChapter.id,
+    );
+    return cleaned;
+  };
+
+  const captureSeasoningHitLore = async (
+    project: NovelProject,
+    chapter: Chapter,
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (message: string) => void;
+    },
+  ) => {
+    const provider = resolveActiveProvider();
+    const latest =
+      dataRef.current.projects.find((item) => item.id === project.id) ?? project;
+    const liveChapter =
+      latest.chapters.find((item) => item.id === chapter.id) ?? chapter;
+    if (!liveChapter.content.trim()) {
+      throw new Error("章节正文为空，无法补充设定");
+    }
+    const chapterIndex = Math.max(
+      0,
+      latest.chapters.findIndex((item) => item.id === liveChapter.id),
+    );
+    options?.onProgress?.("正在根据加料正文抽取角色与时间线…");
+    const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
+      [
+        {
+          index: chapterIndex,
+          title: liveChapter.title,
+          content: liveChapter.content,
+        },
+      ],
+      {
+        maxChapters: 1,
+        perChapterChars: 8000,
+        maxChars: 12000,
+        label: "【局部加料后正文 · 用于询问后补充设定】",
+      },
+    );
+    const captured = await runPostSeasoningCapture(
+      provider,
+      buildPostSeasoningCapturePrompt(
+        latest,
+        sample,
+        sampledChapterIndexes,
+      ),
+      options?.signal,
+      (usage) => recordUsage(project.id, provider, usage, "toolkit", 0),
+    );
+    if (options?.signal?.aborted)
+      throw new DOMException("Aborted", "AbortError");
+    const characterCount = captured.characters.length;
+    const memoryCount = captured.memories.length;
+    if (characterCount || memoryCount) {
+      updateProject(project.id, (current) =>
+        supplementProjectLore(
+          current,
+          {
+            characters: captured.characters,
+            world: [],
+            plot: [],
+            memories: captured.memories,
+          },
+          {
+            chapterIndexes: sampledChapterIndexes,
+            skipIdeaNote: true,
+          },
+        ),
+      );
+    }
+    return { characterCount, memoryCount };
+  };
+
   const pauseGeneration = (projectId: string) => {
     generationAbortRef.current?.abort();
     updateProject(projectId, (project) => ({
@@ -2046,6 +2276,7 @@ function App() {
                 setToolkitResult(null);
                 setToolkitOpen(true);
               }}
+              onOpenSeasoning={() => setView("seasoning")}
             />
           ) : null}
           {view === "characters" && activeProject ? (
@@ -2082,6 +2313,7 @@ function App() {
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
               onToast={setToast}
               onOpenOutline={() => setView("outline")}
+              onSelectChapter={setSelectedChapterId}
               onExtractLore={async () => {
                 const next = await extractLoreIntoProject(activeProject);
                 updateProject(activeProject.id, () => next);
@@ -2089,14 +2321,20 @@ function App() {
                   `设定已提炼：${next.characters.length} 角色 · ${next.worldNotes.length} 世界观 · ${next.plotNotes.length} 情节`,
                 );
               }}
-              onDraftSeasoning={async (chapterIndexes, signal, onProgress) =>
-                runSeasoningDrafts(activeProject, chapterIndexes, {
+              onAdviseHit={async (chapter, hit, authorDraft, signal, onChunk) =>
+                adviseSeasoningHit(activeProject, chapter, hit, authorDraft, {
                   signal,
-                  onProgress,
+                  onChunk,
                 })
               }
-              onApplySeasoning={async (drafts, signal, onProgress) =>
-                applySeasoningDrafts(activeProject, drafts, {
+              onRewriteHit={async (chapter, hit, advice, signal, onChunk) =>
+                rewriteSeasoningHit(activeProject, chapter, hit, advice, {
+                  signal,
+                  onChunk,
+                })
+              }
+              onCaptureHitLore={async (chapter, signal, onProgress) =>
+                captureSeasoningHitLore(activeProject, chapter, {
                   signal,
                   onProgress,
                 })
@@ -3260,6 +3498,7 @@ interface OutlineEditorProps {
   onPause: () => void;
   onResume: () => void;
   onOpenToolkit: () => void;
+  onOpenSeasoning: () => void;
 }
 
 function OutlineEditor({
@@ -3275,6 +3514,7 @@ function OutlineEditor({
   onPause,
   onResume,
   onOpenToolkit,
+  onOpenSeasoning,
 }: OutlineEditorProps) {
   const [query, setQuery] = useState("");
   const [chapterSettingsOpen, setChapterSettingsOpen] = useState(false);
@@ -3283,8 +3523,17 @@ function OutlineEditor({
   const liveCopyRef = useRef<HTMLDivElement | null>(null);
   const liveFollowRef = useRef(true);
   const [liveFollowing, setLiveFollowing] = useState(true);
+  const chapterIndex = project.chapters.findIndex(
+    (item) => item.id === selectedChapterId,
+  );
   const chapter =
-    project.chapters.find((item) => item.id === selectedChapterId) ?? null;
+    (chapterIndex >= 0 ? project.chapters[chapterIndex] : null) ?? null;
+  const previousChapter =
+    chapterIndex > 0 ? project.chapters[chapterIndex - 1] : null;
+  const nextChapter =
+    chapterIndex >= 0 && chapterIndex < project.chapters.length - 1
+      ? project.chapters[chapterIndex + 1]
+      : null;
   const filteredChapters = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) return project.chapters;
@@ -3468,6 +3717,36 @@ function OutlineEditor({
           {chapter ? (
             <section className="writing-pane">
               <div className="writing-toolbar">
+                <div className="chapter-nav-buttons">
+                  <button
+                    className="icon-button small"
+                    disabled={!previousChapter}
+                    aria-label="上一章"
+                    title={
+                      previousChapter
+                        ? `上一章：${previousChapter.title}`
+                        : "已是第一章"
+                    }
+                    onClick={() =>
+                      previousChapter && onSelectChapter(previousChapter.id)
+                    }
+                  >
+                    <ChevronLeft size={17} />
+                  </button>
+                  <button
+                    className="icon-button small"
+                    disabled={!nextChapter}
+                    aria-label="下一章"
+                    title={
+                      nextChapter ? `下一章：${nextChapter.title}` : "已是最后一章"
+                    }
+                    onClick={() =>
+                      nextChapter && onSelectChapter(nextChapter.id)
+                    }
+                  >
+                    <ChevronRight size={17} />
+                  </button>
+                </div>
                 <div className="history-buttons">
                   <button
                     className="icon-button small"
@@ -3487,10 +3766,23 @@ function OutlineEditor({
                   </button>
                 </div>
                 <div className="writing-meta">
+                  <span className="chapter-nav-label">
+                    {chapterIndex >= 0
+                      ? `${chapterIndex + 1} / ${project.chapters.length}`
+                      : ""}
+                  </span>
                   <span className="saved-state">
                     <Check size={14} />
                     已自动保存
                   </span>
+                  <button
+                    className="secondary-button compact"
+                    onClick={onOpenSeasoning}
+                    title="带着当前章节去加料"
+                  >
+                    <FlaskConical size={14} />
+                    去加料
+                  </button>
                   <button
                     className={`secondary-button compact mode-button edit-mode-button ${!previewMode ? "active" : ""}`}
                     onClick={() => setPreviewMode(false)}

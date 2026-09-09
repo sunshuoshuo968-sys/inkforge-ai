@@ -126,7 +126,7 @@ const TOOLS: ToolDef[] = [
   {
     id: "polish",
     label: "保剧情润色",
-    blurb: "单章去腔收紧、提升可读性；不跟「加料」规范。要按场景/关键字增强请用左侧加料页。",
+    blurb: "单章去腔收紧、提升可读性；不跟「加料」规范。要增强细节请到左侧加料页拖选正文。",
     icon: Sparkles,
     maxChapters: 1,
     minChapters: 1,

@@ -609,10 +609,92 @@ ${(project.seasoningSignals ?? [])
 ${lore.rules || '暂无'}
 
 硬规则：
-1. 正文命中识别点/关键字时，优先按「触发场景」对应的场景说明补感官、动作、微表情、环境或生理反应；无关联场景则按识别点正文说明增强。
+1. 正文命中识别点/关键字时，优先按「触发场景」对应的场景说明补情绪、感官、动作、微表情、环境或生理反应；无关联场景则按识别点正文说明增强。
 2. 严格遵守加料规范中的必须 / 禁止 / 偏好 / 密度要求。
-3. 不新增无关支线，不改事件结果与关键伏笔；可适度增字，禁止注水空话。
+3. 不新增无关支线，不改事件结果与关键伏笔；可随指令增加字数但不进行重复的强调或者重复的描写，禁止注水空话。
 4. 只输出可直接替换的完整章节正文，不要解释或 Markdown。`
+}
+
+export type SeasoningHitPromptInput = {
+  chapterTitle: string
+  matchedText: string
+  excerpt: string
+  signalTitle: string
+  signalContent: string
+  signalCategory: string
+  sceneTitle?: string
+  sceneContent?: string
+  rulesText: string
+  /** 作者手写加料说明（润色前） */
+  authorDraft?: string
+  /** 润色后的执行说明（改写用） */
+  advice?: string
+}
+
+/** 润色作者手写的加料说明：不另起炉灶，不输出正文。 */
+export const buildSeasoningHitAdvicePrompt = (
+  project: NovelProject,
+  hit: SeasoningHitPromptInput,
+) => {
+  const lore = compactProjectLoreForPrompt(project)
+  return `你是小说加料编辑。作者已为自己选中的正文写下加料说明，请润色成可直接执行的加料指令。
+
+书名：${safePromptLabel(project.title)}
+章节：${safePromptLabel(hit.chapterTitle)}
+选中摘要：${safePromptLabel(hit.matchedText, 80)}
+
+【选中原文】
+${referenceData('选中原文', hit.excerpt, 2400)}
+
+【作者加料说明（待润色）】
+${authorInstruction(hit.authorDraft || '', 3000)}
+
+【场景说明】
+${hit.sceneTitle
+    ? `${safePromptLabel(hit.sceneTitle)}\n${authorInstruction(hit.sceneContent || '暂无', 1600)}`
+    : '未指定场景。'}
+
+【加料规范】
+${authorInstruction(hit.rulesText || lore.rules || '暂无', 2400)}
+
+要求：
+1. 紧扣作者说明的意图，只做澄清、分点、补全可执行细节；不要另起一套与作者意图无关的加料方案。
+2. 输出 3-8 条短指令，写清要补的感官、动作、微表情、环境或生理反应。
+3. 不改变剧情事件结果、人物关系与能力边界；不新开支线。
+4. 只输出润色后的加料说明，不要输出改写正文，不要 Markdown 大标题。`
+}
+
+/** 按润色后的说明局部改写选中片段，只输出可替换正文。 */
+export const buildSeasoningHitRewritePrompt = (
+  project: NovelProject,
+  hit: SeasoningHitPromptInput,
+) => {
+  const lore = compactProjectLoreForPrompt(project)
+  return `执行「局部加料改写」。严格按执行说明改写选中原文，输出可直接替换该片段的正文。
+
+书名：${safePromptLabel(project.title)}
+章节：${safePromptLabel(hit.chapterTitle)}
+选中摘要：${safePromptLabel(hit.matchedText, 80)}
+
+【待替换的选中原文】
+${referenceData('选中原文', hit.excerpt, 2400)}
+
+【场景说明】
+${hit.sceneTitle
+    ? `${safePromptLabel(hit.sceneTitle)}\n${authorInstruction(hit.sceneContent || '暂无', 1600)}`
+    : '未指定场景。'}
+
+【加料规范】
+${authorInstruction(hit.rulesText || lore.rules || '暂无', 2400)}
+
+【执行说明（作者确认 / AI 润色后）】
+${authorInstruction(hit.advice || hit.authorDraft || '按选中原文适度增强细节。', 3000)}
+
+硬规则：
+1. 只输出替换后的局部正文，首尾与上下文语气衔接；不要章名、解释、Markdown。
+2. 不改变事件结果、人物关系、能力边界与关键信息。
+3. 优先落实执行说明中的可执行点；可随指令增加字数但不进行重复的强调或者重复的描写，禁止注水空话。
+4. 不要输出整章，不要复述未提供的前后文。`
 }
 
 /** 加料改写后：从增强章节捕获角色与时间线增量。 */
