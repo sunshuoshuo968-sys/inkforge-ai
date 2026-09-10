@@ -480,3 +480,46 @@ export const buildSelectedChaptersSample = (
     charCount: sample.length,
   }
 }
+
+const isBookFileName = (fileName: string) => {
+  const name = fileName.trim()
+  // 与 epub.ts 的 isEpubFileName / isTxtFileName 语义一致，但内联以避免循环依赖
+  return /\.(txt|epub)$/i.test(name) || !name.includes('.')
+}
+
+/**
+ * 从一批本地文件中挑出可导入的书（TXT / EPUB），并按文件名稳定排序。
+ * 无扩展名文件沿用现有「视为 TXT」的兜底语义。
+ */
+export const pickBookFiles = (files: File[]): File[] =>
+  [...files]
+    .filter((file) => isBookFileName(file.name))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }),
+    )
+
+export interface BookChapters {
+  title: string
+  chapters: TxtChapterSlice[]
+}
+
+/**
+ * 把多本书的章节合并成一份章节列表，供「合并成一本书」使用。
+ * 单书时章节标题保持原样；多书时每章标题加 `【书名】` 前缀以消歧义，
+ * 同时保留分卷信息。空书会被跳过。
+ */
+export const mergeBookChapters = (books: BookChapters[]): TxtChapterSlice[] => {
+  const nonEmpty = books.filter((book) => book.chapters.length > 0)
+  if (nonEmpty.length === 0) return []
+  const single = nonEmpty.length === 1
+  const merged: TxtChapterSlice[] = []
+  for (const book of nonEmpty) {
+    const prefix = book.title.trim() || '导入小说'
+    for (const chapter of book.chapters) {
+      merged.push(
+        single ? chapter : { ...chapter, title: `【${prefix}】${chapter.title}` },
+      )
+    }
+  }
+  return merged
+}

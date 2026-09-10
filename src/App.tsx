@@ -22,6 +22,7 @@ import {
   FilePenLine,
   FilePlus2,
   FileText,
+  FolderOpen,
   Globe2,
   GripHorizontal,
   Home,
@@ -138,6 +139,8 @@ import {
   describeTxtFileRisk,
   estimateWordsFast,
   exportProjectAsTxt,
+  mergeBookChapters,
+  pickBookFiles,
   readTxtFile,
   splitTxtIntoChaptersAsync,
   summarizeTxtChapters,
@@ -890,6 +893,20 @@ function App() {
         ? `已导入《${project.title}》并完成设定提炼（${project.characters.length} 角色）`
         : `已导入《${project.title}》，共 ${project.chapters.length} 章`,
     );
+  };
+
+  const createNovelFromTxtBatch = (projects: NovelProject[]) => {
+    if (!projects.length) return;
+    const first = projects[0];
+    replaceData((current) => ({
+      ...current,
+      projects: [...projects, ...current.projects],
+      activeProjectId: first.id,
+    }));
+    setSelectedChapterId(first.chapters[0]?.id ?? null);
+    setView("home");
+    setImportTxtOpen(false);
+    setToast(`已导入 ${projects.length} 本本地书`);
   };
 
   const extractLoreIntoProject = async (
@@ -2579,6 +2596,7 @@ function App() {
           data={data}
           onClose={() => setImportTxtOpen(false)}
           onCreate={createNovelFromTxt}
+          onCreateMany={createNovelFromTxtBatch}
           onToast={setToast}
           onOpenSettings={() => {
             setImportTxtOpen(false);
@@ -7485,6 +7503,7 @@ function ImportTxtDialog({
   data,
   onClose,
   onCreate,
+  onCreateMany,
   onToast,
   onOpenSettings,
   onExtractLore,
@@ -7492,6 +7511,7 @@ function ImportTxtDialog({
   data: AppData;
   onClose: () => void;
   onCreate: (project: NovelProject, loreApplied?: boolean) => void;
+  onCreateMany: (projects: NovelProject[]) => void;
   onToast: (message: string) => void;
   onOpenSettings: () => void;
   onExtractLore: (
@@ -7513,7 +7533,13 @@ function ImportTxtDialog({
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [pickedFiles, setPickedFiles] = useState<File[]>([]);
+  const [mergeMode, setMergeMode] = useState(false);
+  const [batchStrategy, setBatchStrategy] = useState<"separate" | "merge">(
+    "separate",
+  );
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dirInputRef = useRef<HTMLInputElement | null>(null);
   const rawTextRef = useRef("");
   const epubChaptersRef = useRef<TxtChapterSlice[]>([]);
   const splitAbortRef = useRef<AbortController | null>(null);
@@ -7613,19 +7639,41 @@ function ImportTxtDialog({
     }
   };
 
-  const onPickFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-
+  const detectBookKind = (file: File): "txt" | "epub" | "" => {
     const lowerName = file.name.toLowerCase();
-    const kind = isEpubFileName(lowerName)
-      ? "epub"
-      : isTxtFileName(lowerName) ||
-          file.type === "text/plain" ||
-          !lowerName.includes(".")
-        ? "txt"
-        : "";
+    if (isEpubFileName(lowerName)) return "epub";
+    if (
+      isTxtFileName(lowerName) ||
+      file.type === "text/plain" ||
+      !lowerName.includes(".")
+    )
+      return "txt";
+    return "";
+  };
+
+  /** 解析单个书文件为章节列表（不触碰组件状态），供批量导入复用。 */
+  const parseBookFile = async (
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<{ title: string; chapters: TxtChapterSlice[] }> => {
+    const kind = detectBookKind(file);
+    if (!kind) throw new Error(`不支持的文件类型：${file.name}`);
+    if (kind === "epub") {
+      const parsed = await parseEpubFile(file, { signal });
+      const deduped = dedupeRedundantChapters(parsed.chapters);
+      return {
+        title: parsed.title || titleFromFileName(file.name),
+        chapters: deduped.chapters,
+      };
+    }
+    const text = await readTxtFile(file);
+    const chapters = await splitTxtIntoChaptersAsync(text, { signal });
+    const deduped = dedupeRedundantChapters(chapters);
+    return { title: titleFromFileName(file.name), chapters: deduped.chapters };
+  };
+
+  const handleSingleFile = async (file: File) => {
+    const kind = detectBookKind(file);
     if (!kind) {
       setError("仅支持 TXT 或 EPUB 文件");
       onToast("仅支持 TXT 或 EPUB");
@@ -7650,6 +7698,8 @@ function ImportTxtDialog({
     setStatus(kind === "epub" ? "正在解析 EPUB…" : "正在读取文件…");
     setFileBytes(file.size);
     setFileKind(kind);
+    setPickedFiles([]);
+    setMergeMode(false);
     rawTextRef.current = "";
     epubChaptersRef.current = [];
 
@@ -7682,6 +7732,129 @@ function ImportTxtDialog({
         return;
       setError(reason instanceof Error ? reason.message : "读取文件失败");
       onToast(kind === "epub" ? "读取 EPUB 失败" : "读取 TXT 失败");
+    } finally {
+      if (splitAbortRef.current === controller) {
+        splitAbortRef.current = null;
+        setLoading(false);
+        setStatus("");
+      }
+    }
+  };
+
+  const onPickFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (files.length === 1) {
+      await handleSingleFile(files[0]);
+      return;
+    }
+    const books = pickBookFiles(files);
+    if (!books.length) {
+      setError("所选内容中没有 TXT 或 EPUB 文件");
+      onToast("未找到可导入的书");
+      return;
+    }
+    splitAbortRef.current?.abort();
+    setError("");
+    setChapters([]);
+    setDedupedCount(0);
+    setProgress(0);
+    setStatus("");
+    setLoading(false);
+    setMergeMode(false);
+    setFileBytes(0);
+    setFileKind("");
+    rawTextRef.current = "";
+    epubChaptersRef.current = [];
+    setPickedFiles(books);
+    setFileName(`${books.length} 个文件`);
+  };
+
+  const importAsSeparate = async () => {
+    const files = pickedFiles;
+    if (!files.length || loading || importing) return;
+    splitAbortRef.current?.abort();
+    const controller = new AbortController();
+    splitAbortRef.current = controller;
+    setImporting(true);
+    setError("");
+    setProgress(0);
+    const projects: NovelProject[] = [];
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setStatus(`正在解析 ${index + 1}/${files.length} · ${file.name}`);
+        const { title: bookTitle, chapters: bookChapters } = await parseBookFile(
+          file,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        const project = await createProjectFromTxtAsync(
+          bookTitle,
+          bookChapters,
+          "导入",
+          { signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        projects.push(project);
+        setProgress((index + 1) / files.length);
+      }
+      onCreateMany(projects);
+    } catch (reason) {
+      if (
+        controller.signal.aborted ||
+        (reason instanceof DOMException && reason.name === "AbortError")
+      )
+        return;
+      setError(reason instanceof Error ? reason.message : "批量导入失败");
+      onToast("批量导入失败");
+    } finally {
+      if (splitAbortRef.current === controller) {
+        splitAbortRef.current = null;
+        setImporting(false);
+        setStatus("");
+      }
+    }
+  };
+
+  const importAsMerge = async () => {
+    const files = pickedFiles;
+    if (!files.length || loading || importing) return;
+    splitAbortRef.current?.abort();
+    const controller = new AbortController();
+    splitAbortRef.current = controller;
+    setLoading(true);
+    setError("");
+    setProgress(0);
+    setChapters([]);
+    setDedupedCount(0);
+    const books: Array<{ title: string; chapters: TxtChapterSlice[] }> = [];
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setStatus(`正在解析 ${index + 1}/${files.length} · ${file.name}`);
+        const parsed = await parseBookFile(file, controller.signal);
+        if (controller.signal.aborted) return;
+        books.push(parsed);
+        setProgress((index + 1) / files.length);
+      }
+      const merged = mergeBookChapters(books);
+      setChapters(merged);
+      setMergeMode(true);
+      setPickedFiles([]);
+      setFileKind("txt");
+      setFileName(`${files.length} 个文件`);
+      if (!title.trim()) setTitle(titleFromFileName(files[0].name));
+      setProgress(1);
+    } catch (reason) {
+      if (
+        controller.signal.aborted ||
+        (reason instanceof DOMException && reason.name === "AbortError")
+      )
+        return;
+      setError(reason instanceof Error ? reason.message : "合并解析失败");
+      onToast("合并解析失败");
     } finally {
       if (splitAbortRef.current === controller) {
         splitAbortRef.current = null;
@@ -7799,8 +7972,17 @@ function ImportTxtDialog({
               ref={inputRef}
               type="file"
               accept=".txt,.epub,text/plain,application/epub+zip"
+              multiple
               hidden
-              onChange={(event) => void onPickFile(event)}
+              onChange={(event) => void onPickFiles(event)}
+            />
+            <input
+              ref={dirInputRef}
+              type="file"
+              accept=".txt,.epub,text/plain,application/epub+zip"
+              hidden
+              {...({ webkitdirectory: "" } as Record<string, string>)}
+              onChange={(event) => void onPickFiles(event)}
             />
             <button
               type="button"
@@ -7815,18 +7997,90 @@ function ImportTxtDialog({
               )}
               {fileName || "选择 TXT / EPUB 文件"}
             </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => dirInputRef.current?.click()}
+              title="选择整个文件夹批量导入"
+            >
+              <FolderOpen size={16} />
+              选择文件夹
+            </button>
             {fileName ? (
               <small>
-                {fileKind === "epub" ? "EPUB" : "TXT"} · {summary.chapterCount}{" "}
-                章 · 约 {summary.totalWords.toLocaleString()} 字
-                {fileBytes ? ` · ${formatFileMeta(fileBytes)}` : ""}
+                {mergeMode
+                  ? `已合并 ${fileName} · ${summary.chapterCount} 章`
+                  : pickedFiles.length
+                    ? `已选 ${pickedFiles.length} 个文件`
+                    : `${fileKind === "epub" ? "EPUB" : "TXT"} · ${summary.chapterCount} 章 · 约 ${summary.totalWords.toLocaleString()} 字${
+                        fileBytes ? ` · ${formatFileMeta(fileBytes)}` : ""
+                      }`}
               </small>
             ) : (
               <small>
-                TXT 支持 UTF-8 / GBK · EPUB 按目录阅读顺序分章 · 大文件异步处理
+                TXT 支持 UTF-8 / GBK · EPUB 按目录阅读顺序分章 · 大文件异步处理 ·
+                可多选或选整个文件夹
               </small>
             )}
           </div>
+
+          {pickedFiles.length > 1 ? (
+            <div className="import-batch-mode" role="group" aria-label="批量导入方式">
+              <button
+                type="button"
+                className={batchStrategy === "separate" ? "active" : ""}
+                disabled={busy}
+                onClick={() => setBatchStrategy("separate")}
+              >
+                每本独立成书
+              </button>
+              <button
+                type="button"
+                className={batchStrategy === "merge" ? "active" : ""}
+                disabled={busy}
+                onClick={() => setBatchStrategy("merge")}
+              >
+                合并成一本书
+              </button>
+            </div>
+          ) : null}
+
+          {pickedFiles.length > 1 && batchStrategy === "separate" ? (
+            <div className="import-batch-actions">
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void importAsSeparate()}
+              >
+                {importing ? (
+                  <LoaderCircle className="spin" size={16} />
+                ) : (
+                  <Import size={16} />
+                )}
+                {importing ? "正在批量导入…" : `导入 ${pickedFiles.length} 本独立作品`}
+              </button>
+            </div>
+          ) : null}
+
+          {pickedFiles.length > 1 && batchStrategy === "merge" ? (
+            <div className="import-batch-actions">
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void importAsMerge()}
+              >
+                {loading ? (
+                  <LoaderCircle className="spin" size={16} />
+                ) : (
+                  <Import size={16} />
+                )}
+                {loading ? "正在合并解析…" : `合并 ${pickedFiles.length} 个文件后预览`}
+              </button>
+            </div>
+          ) : null}
 
           {fileRisk && fileRisk.level !== "ok" ? (
             <p className={`import-txt-warning ${fileRisk.level}`}>
@@ -7834,6 +8088,8 @@ function ImportTxtDialog({
             </p>
           ) : null}
 
+          {pickedFiles.length <= 1 ? (
+          <>
           <Field label="小说名称">
             <input
               value={title}
@@ -7851,6 +8107,7 @@ function ImportTxtDialog({
             />
           </Field>
 
+          {!mergeMode ? (
           <div className="import-split-mode" role="group" aria-label="分章方式">
             <button
               type="button"
@@ -7869,6 +8126,7 @@ function ImportTxtDialog({
               整篇一章
             </button>
           </div>
+          ) : null}
 
           <label
             className={`import-ai-extract ${extractWithAi ? "active" : ""}`}
@@ -7902,6 +8160,8 @@ function ImportTxtDialog({
                 前往设置
               </button>
             </div>
+          ) : null}
+          </>
           ) : null}
 
           {busy ? (
@@ -7961,6 +8221,7 @@ function ImportTxtDialog({
           >
             取消
           </button>
+          {pickedFiles.length <= 1 ? (
           <button
             type="submit"
             className="primary-button"
@@ -7986,6 +8247,7 @@ function ImportTxtDialog({
                 ? "导入并提炼设定"
                 : "导入并打开"}
           </button>
+          ) : null}
         </div>
       </form>
     </div>
