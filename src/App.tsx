@@ -134,6 +134,7 @@ import {
   buildImportLoreSample,
   buildSelectedChaptersSample,
   createProjectFromTxtAsync,
+  dedupeRedundantChapters,
   describeTxtFileRisk,
   estimateWordsFast,
   exportProjectAsTxt,
@@ -3522,6 +3523,9 @@ function OutlineEditor({
   const [previewMode, setPreviewMode] = useState(false);
   const liveCopyRef = useRef<HTMLDivElement | null>(null);
   const liveFollowRef = useRef(true);
+  const manuscriptRef = useRef<HTMLTextAreaElement | null>(null);
+  const manuscriptPreviewRef = useRef<HTMLDivElement | null>(null);
+  const activeChapterRowRef = useRef<HTMLButtonElement | null>(null);
   const [liveFollowing, setLiveFollowing] = useState(true);
   const chapterIndex = project.chapters.findIndex(
     (item) => item.id === selectedChapterId,
@@ -3562,6 +3566,21 @@ function OutlineEditor({
       liveCopyRef.current?.scrollTo({ top: liveCopyRef.current.scrollHeight });
     }
   }, [chapter?.id, chapter?.generationStatus]);
+  useEffect(() => {
+    if (!chapter?.id) return;
+    if (chapter.generationStatus === "generating") return;
+    manuscriptRef.current?.scrollTo({ top: 0 });
+    manuscriptPreviewRef.current?.scrollTo({ top: 0 });
+  }, [chapter?.id, chapter?.generationStatus, previewMode]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      activeChapterRowRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedChapterId]);
   const patchChapter = (patch: Partial<Chapter>) => {
     if (!chapter) return;
     onUpdate((current) => ({
@@ -3593,6 +3612,33 @@ function OutlineEditor({
     }));
     onSelectChapter(next.id);
   };
+  const deleteChapterRef = useRef(deleteChapter);
+  deleteChapterRef.current = deleteChapter;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Delete") return;
+      if (event.defaultPrevented) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+        return;
+      if (chapterSettingsOpen) return;
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const tag = target.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+      event.preventDefault();
+      deleteChapterRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [chapterSettingsOpen]);
 
   const exportChapter = () => {
     if (!chapter) return;
@@ -3682,6 +3728,7 @@ function OutlineEditor({
               {filteredChapters.map((item, index) => (
                 <button
                   key={item.id}
+                  ref={item.id === chapter?.id ? activeChapterRowRef : undefined}
                   className={`chapter-row ${item.id === chapter?.id ? "active" : ""}`}
                   onClick={() => onSelectChapter(item.id)}
                 >
@@ -3784,6 +3831,19 @@ function OutlineEditor({
                     去加料
                   </button>
                   <button
+                    className="secondary-button compact danger"
+                    onClick={deleteChapter}
+                    disabled={project.chapters.length <= 1}
+                    title={
+                      project.chapters.length <= 1
+                        ? "至少保留一个章节"
+                        : "将本章移到回收站（Delete）"
+                    }
+                  >
+                    <Trash2 size={14} />
+                    移到回收站
+                  </button>
+                  <button
                     className={`secondary-button compact mode-button edit-mode-button ${!previewMode ? "active" : ""}`}
                     onClick={() => setPreviewMode(false)}
                   >
@@ -3823,10 +3883,6 @@ function OutlineEditor({
                       <button onClick={() => setChapterSettingsOpen(true)}>
                         <SlidersHorizontal size={14} />
                         章节设置
-                      </button>
-                      <button className="danger" onClick={deleteChapter}>
-                        <Trash2 size={14} />
-                        移到回收站
                       </button>
                     </div>
                   </details>
@@ -3902,13 +3958,19 @@ function OutlineEditor({
                     ) : null}
                   </div>
                 ) : previewMode ? (
-                  <div className="manuscript manuscript-preview">
+                  <div
+                    key={chapter.id}
+                    ref={manuscriptPreviewRef}
+                    className="manuscript manuscript-preview"
+                  >
                     {chapter.content || (
                       <span className="live-placeholder">本章暂无正文</span>
                     )}
                   </div>
                 ) : (
                   <textarea
+                    key={chapter.id}
+                    ref={manuscriptRef}
                     className="manuscript"
                     value={chapter.content}
                     onChange={(event) =>
@@ -5549,7 +5611,7 @@ function SettingsView({
                       <small>会加在该模型每次调用的系统提示最前面</small>
                     </span>
                     <textarea
-                      rows={5}
+                      rows={10}
                       value={draftProvider.breakArmorPrompt ?? ""}
                       onChange={(event) =>
                         patchDraftProvider(draftProvider.id, {
@@ -7443,6 +7505,7 @@ function ImportTxtDialog({
   const [fileKind, setFileKind] = useState<"txt" | "epub" | "">("");
   const [fileBytes, setFileBytes] = useState(0);
   const [chapters, setChapters] = useState<TxtChapterSlice[]>([]);
+  const [dedupedCount, setDedupedCount] = useState(0);
   const [asSingle, setAsSingle] = useState(false);
   const [extractWithAi, setExtractWithAi] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -7478,6 +7541,7 @@ function ImportTxtDialog({
     setLoading(true);
     setError("");
     setProgress(0);
+    setDedupedCount(0);
     setStatus(single ? "正在整理全文…" : "正在异步分章…");
     try {
       if (single) {
@@ -7497,7 +7561,12 @@ function ImportTxtDialog({
         onProgress: setProgress,
       });
       if (controller.signal.aborted) return;
-      setChapters(next);
+      const deduped = dedupeRedundantChapters(next);
+      setChapters(deduped.chapters);
+      setDedupedCount(deduped.removedCount);
+      if (deduped.removedCount > 0) {
+        onToast(`已跳过 ${deduped.removedCount} 个重复目录章`);
+      }
     } catch (reason) {
       if (
         controller.signal.aborted ||
@@ -7505,6 +7574,7 @@ function ImportTxtDialog({
       )
         return;
       setChapters([]);
+      setDedupedCount(0);
       setError(reason instanceof Error ? reason.message : "分章失败");
       onToast("分章失败");
     } finally {
@@ -7532,9 +7602,15 @@ function ImportTxtDialog({
           ? [{ title: "第1章", content, words: estimateWordsFast(content) }]
           : [],
       );
+      setDedupedCount(0);
       return;
     }
-    setChapters(spineChapters);
+    const deduped = dedupeRedundantChapters(spineChapters);
+    setChapters(deduped.chapters);
+    setDedupedCount(deduped.removedCount);
+    if (deduped.removedCount > 0) {
+      onToast(`已跳过 ${deduped.removedCount} 个重复目录章`);
+    }
   };
 
   const onPickFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -7569,6 +7645,7 @@ function ImportTxtDialog({
     setLoading(true);
     setError("");
     setChapters([]);
+    setDedupedCount(0);
     setProgress(0);
     setStatus(kind === "epub" ? "正在解析 EPUB…" : "正在读取文件…");
     setFileBytes(file.size);
@@ -7841,6 +7918,12 @@ function ImportTxtDialog({
                 {progress > 0 ? ` · ${Math.round(progress * 100)}%` : ""}
               </small>
             </div>
+          ) : null}
+
+          {dedupedCount > 0 ? (
+            <p className="import-txt-warning warn">
+              已自动跳过 {dedupedCount} 个重复目录章（仅去重章节条目，正文未改动）。
+            </p>
           ) : null}
 
           {error ? <p className="import-txt-error">{error}</p> : null}

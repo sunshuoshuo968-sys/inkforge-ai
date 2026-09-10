@@ -14,6 +14,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { now, uid } from "./data";
@@ -37,6 +39,25 @@ import type {
 type SeasoningTab = "scenes" | "signals" | "rules";
 type WorkspaceMode = "annotate" | "library";
 
+const ADVICE_WIDTH_KEY = "inkforge.seasoningAdviceWidth";
+const ADVICE_WIDTH_MIN = 280;
+const ADVICE_WIDTH_MAX = 560;
+const ADVICE_WIDTH_DEFAULT = 340;
+
+const clampAdviceWidth = (width: number) =>
+  Math.min(ADVICE_WIDTH_MAX, Math.max(ADVICE_WIDTH_MIN, Math.round(width)));
+
+const readStoredAdviceWidth = () => {
+  try {
+    const raw = window.localStorage.getItem(ADVICE_WIDTH_KEY);
+    const parsed = raw ? Number(raw) : ADVICE_WIDTH_DEFAULT;
+    return Number.isFinite(parsed)
+      ? clampAdviceWidth(parsed)
+      : ADVICE_WIDTH_DEFAULT;
+  } catch {
+    return ADVICE_WIDTH_DEFAULT;
+  }
+};
 const seasoningTabConfig: Record<
   SeasoningTab,
   {
@@ -164,9 +185,17 @@ export function SeasoningView({
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const readerRef = useRef<HTMLDivElement | null>(null);
+  const adviceWidthRef = useRef(ADVICE_WIDTH_DEFAULT);
+  const adviceResizeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+  const [adviceWidth, setAdviceWidth] = useState(readStoredAdviceWidth);
   const provider =
     providers.find((item) => item.id === activeProviderId) ?? providers[0];
   const budget = estimateContextBudget(project);
+  adviceWidthRef.current = adviceWidth;
 
   const chapterIndex = Math.max(
     0,
@@ -307,6 +336,46 @@ export function SeasoningView({
   const setActiveAdvice = (value: string) => {
     if (!activeHit) return;
     setAdviceByHit((current) => ({ ...current, [activeHit.id]: value }));
+  };
+
+  const onAdviceResizePointerDown = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    adviceResizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: adviceWidthRef.current,
+    };
+  };
+
+  const onAdviceResizePointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const drag = adviceResizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const next = clampAdviceWidth(
+      drag.startWidth + (drag.startX - event.clientX),
+    );
+    adviceWidthRef.current = next;
+    setAdviceWidth(next);
+  };
+
+  const onAdviceResizePointerUp = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const drag = adviceResizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    adviceResizeRef.current = null;
+    try {
+      window.localStorage.setItem(
+        ADVICE_WIDTH_KEY,
+        String(adviceWidthRef.current),
+      );
+    } catch {
+      /* ignore quota / private mode */
+    }
   };
 
   const captureSelection = () => {
@@ -746,7 +815,14 @@ export function SeasoningView({
               </button>
             </div>
           ) : (
-            <div className="seasoning-annotate-body">
+            <div
+              className="seasoning-annotate-body"
+              style={
+                {
+                  "--seasoning-advice-width": `${adviceWidth}px`,
+                } as CSSProperties
+              }
+            >
               <aside className="seasoning-hit-list" aria-label="选区列表">
                 {displayHits.length ? (
                   displayHits.map((hit, index) => (
@@ -798,6 +874,19 @@ export function SeasoningView({
               </div>
 
               <aside className="seasoning-advice-panel" aria-label="加料意见">
+                <div
+                  className="seasoning-advice-resizer"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="拖拽调整加料意见区宽度"
+                  aria-valuemin={ADVICE_WIDTH_MIN}
+                  aria-valuemax={ADVICE_WIDTH_MAX}
+                  aria-valuenow={adviceWidth}
+                  onPointerDown={onAdviceResizePointerDown}
+                  onPointerMove={onAdviceResizePointerMove}
+                  onPointerUp={onAdviceResizePointerUp}
+                  onPointerCancel={onAdviceResizePointerUp}
+                />
                 {activeHit ? (
                   <>
                     <div className="seasoning-advice-head">
@@ -878,7 +967,7 @@ export function SeasoningView({
                     {busy && progress ? (
                       <p className="import-txt-warning warn">{progress}</p>
                     ) : null}
-                    <label className="seasoning-draft-field">
+                    <label className="seasoning-draft-field seasoning-advice-exec">
                       <span>润色后的执行说明（可再改）</span>
                       <textarea
                         value={activeAdvice}

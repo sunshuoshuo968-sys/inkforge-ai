@@ -226,6 +226,80 @@ export const summarizeTxtChapters = (chapters: TxtChapterSlice[]) => ({
   totalWords: chapters.reduce((sum, chapter) => sum + (chapter.words ?? estimateWordsFast(chapter.content)), 0),
 })
 
+/** 归一化章节标题，便于识别目录重复章（不改动正文）。 */
+export const normalizeChapterTitle = (title: string) =>
+  title
+    .trim()
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[：:：\-—–·.、|/／]+/g, '')
+    .replace(/[０-９]/g, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xff10 + 0x30))
+    .toLowerCase()
+
+/** 空目录章阈值：正文极少且后文另有同名实章时视为多余。 */
+const TOC_STUB_MAX_WORDS = 80
+
+/**
+ * 剔除导入时常见的多余重复章节条目（仅删整章，不改任何正文内容）。
+ * - 同名空/极短目录章：后文已有更充实同名章时去掉前者
+ * - 相邻同名：保留字数更多的那一条
+ */
+export const dedupeRedundantChapters = (
+  chapters: TxtChapterSlice[],
+): { chapters: TxtChapterSlice[]; removedCount: number } => {
+  if (chapters.length < 2) return { chapters, removedCount: 0 }
+
+  const wordsOf = (chapter: TxtChapterSlice) =>
+    chapter.words ?? estimateWordsFast(chapter.content)
+
+  const drop = new Set<number>()
+
+  // 后文同名实章 → 去掉前文空目录章
+  const bestByTitle = new Map<string, { index: number; words: number }>()
+  for (let index = chapters.length - 1; index >= 0; index -= 1) {
+    const key = normalizeChapterTitle(chapters[index].title)
+    if (!key) continue
+    const words = wordsOf(chapters[index])
+    const existing = bestByTitle.get(key)
+    if (!existing || words > existing.words) {
+      bestByTitle.set(key, { index, words })
+    }
+  }
+  for (let index = 0; index < chapters.length; index += 1) {
+    const key = normalizeChapterTitle(chapters[index].title)
+    if (!key) continue
+    const words = wordsOf(chapters[index])
+    const best = bestByTitle.get(key)
+    if (
+      best &&
+      best.index > index &&
+      words <= TOC_STUB_MAX_WORDS &&
+      best.words > Math.max(words * 3, TOC_STUB_MAX_WORDS)
+    ) {
+      drop.add(index)
+    }
+  }
+
+  // 相邻同名：留字数更多的；相等则留后一条
+  for (let index = 0; index < chapters.length - 1; index += 1) {
+    if (drop.has(index)) continue
+    let next = index + 1
+    while (next < chapters.length && drop.has(next)) next += 1
+    if (next >= chapters.length) break
+    const leftKey = normalizeChapterTitle(chapters[index].title)
+    const rightKey = normalizeChapterTitle(chapters[next].title)
+    if (!leftKey || leftKey !== rightKey) continue
+    const leftWords = wordsOf(chapters[index])
+    const rightWords = wordsOf(chapters[next])
+    drop.add(leftWords >= rightWords ? next : index)
+  }
+
+  if (!drop.size) return { chapters, removedCount: 0 }
+  return {
+    chapters: chapters.filter((_, index) => !drop.has(index)),
+    removedCount: drop.size,
+  }
+}
+
 export const createProjectFromTxt = (
   title: string,
   chapters: TxtChapterSlice[],

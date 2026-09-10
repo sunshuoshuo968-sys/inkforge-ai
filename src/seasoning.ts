@@ -73,10 +73,7 @@ const buildExcerptWindow = (
     excerptStart -= 1;
     if (start - excerptStart > radius + 40) break;
   }
-  while (
-    excerptEnd < content.length &&
-    !/\s/.test(content[excerptEnd] ?? "")
-  ) {
+  while (excerptEnd < content.length && !/\s/.test(content[excerptEnd] ?? "")) {
     excerptEnd += 1;
     if (excerptEnd - end > radius + 40) break;
   }
@@ -132,16 +129,11 @@ export const findSeasoningHits = (
   const hits: SeasoningHit[] = [];
   for (const candidate of candidates) {
     const overlaps = occupied.some(
-      (span) =>
-        candidate.start < span.end && candidate.end > span.start,
+      (span) => candidate.start < span.end && candidate.end > span.start,
     );
     if (overlaps) continue;
     occupied.push({ start: candidate.start, end: candidate.end });
-    const window = buildExcerptWindow(
-      content,
-      candidate.start,
-      candidate.end,
-    );
+    const window = buildExcerptWindow(content, candidate.start, candidate.end);
     hits.push({
       id: `${candidate.signal.id}:${candidate.start}:${candidate.end}`,
       signalId: candidate.signal.id,
@@ -190,8 +182,7 @@ export const createManualSeasoningHit = (
   if (start < 0 || end <= start || end > content.length) return null;
   const matched = content.slice(start, end);
   if (!matched.trim()) return null;
-  const label =
-    matched.replace(/\s+/g, " ").trim().slice(0, 28) || "选中片段";
+  const label = matched.replace(/\s+/g, " ").trim().slice(0, 28) || "选中片段";
   return {
     id: `manual:${start}:${end}`,
     signalId: "",
@@ -286,8 +277,7 @@ export const estimateContextBudget = (project: NovelProject) => {
     joinNotes(project.seasoningScenes).length +
     joinNotes(project.seasoningSignals).length +
     joinNotes(project.seasoningRules).length;
-  const total =
-    characters + world + plot + outline + memoryLength + seasoning;
+  const total = characters + world + plot + outline + memoryLength + seasoning;
   return {
     characters,
     world,
@@ -320,11 +310,14 @@ export const assessSeasoningDraft = (before: string, after: string) => {
   const afterWords = countWords(after);
   const ratio = afterWords / beforeWords;
   const anchors = pickAnchors(before);
-  const missing = anchors.filter((item) => !after.replace(/\s+/g, "").includes(item));
+  const missing = anchors.filter(
+    (item) => !after.replace(/\s+/g, "").includes(item),
+  );
   const warnings: string[] = [];
   if (ratio < 0.7) warnings.push(`字数偏少（${Math.round(ratio * 100)}%）`);
   if (ratio > 2.8) warnings.push(`字数膨胀（${Math.round(ratio * 100)}%）`);
-  if (missing.length >= 2) warnings.push("原文关键片段保留较少，请人工核对剧情");
+  if (missing.length >= 2)
+    warnings.push("原文关键片段保留较少，请人工核对剧情");
   return {
     beforeWords,
     afterWords,

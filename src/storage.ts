@@ -133,9 +133,7 @@ export const parseImport = async (
           // Backups intentionally contain blank keys; keep credentials already
           // stored on this device only when the endpoint is unchanged.
           apiKey:
-            existing?.baseUrl.trim() === baseUrl.trim()
-              ? existing.apiKey
-              : "",
+            existing?.baseUrl.trim() === baseUrl.trim() ? existing.apiKey : "",
           model: String(provider.model || ""),
           enabled: provider.enabled !== false,
           breakArmorPrompt:
