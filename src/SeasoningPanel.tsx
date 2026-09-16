@@ -8,6 +8,7 @@ import {
   Search,
   Square,
   Trash2,
+  Undo2,
 } from "lucide-react";
 import {
   useEffect,
@@ -21,14 +22,17 @@ import {
 import { now, uid } from "./data";
 import {
   applySeasoningHitRewrite,
+  applySeasoningHitRewrites,
   createManualSeasoningHit,
   estimateContextBudget,
   formatSeasoningLinkLabel,
   getOffsetsInTextContainer,
   segmentContentByHits,
+  withSeasoningChapterTitle,
   type SeasoningHit,
 } from "./seasoning";
 import type {
+  AiOperation,
   AppData,
   Chapter,
   NoteItem,
@@ -38,6 +42,9 @@ import type {
 
 type SeasoningTab = "scenes" | "signals" | "rules";
 type WorkspaceMode = "annotate" | "library";
+type SeasoningBusy = "advise" | "rewrite" | "batchRewrite" | "capture" | null;
+
+const BATCH_REWRITE_MAX = 3;
 
 const ADVICE_WIDTH_KEY = "inkforge.seasoningAdviceWidth";
 const ADVICE_WIDTH_MIN = 280;
@@ -127,6 +134,7 @@ export function SeasoningView({
   onAdviseHit,
   onRewriteHit,
   onCaptureHitLore,
+  onRecordOperation,
 }: {
   project: NovelProject;
   selectedChapterId: string | null;
@@ -156,6 +164,9 @@ export function SeasoningView({
     signal: AbortSignal,
     onProgress?: (message: string) => void,
   ) => Promise<{ characterCount: number; memoryCount: number }>;
+  onRecordOperation: (
+    operation: Omit<AiOperation, "id" | "createdAt">,
+  ) => void;
 }) {
   const [mode, setMode] = useState<WorkspaceMode>("annotate");
   const [tab, setTab] = useState<SeasoningTab>("scenes");
@@ -175,13 +186,25 @@ export function SeasoningView({
     before: string;
     after: string;
   } | null>(null);
-  const [busy, setBusy] = useState<"advise" | "rewrite" | "capture" | null>(
-    null,
-  );
+  const [batchRewritePreview, setBatchRewritePreview] = useState<
+    Array<{
+      hit: SeasoningHit;
+      before: string;
+      after: string;
+    }> | null
+  >(null);
+  const [busy, setBusy] = useState<SeasoningBusy>(null);
   const [progress, setProgress] = useState("");
   const [captureOffer, setCaptureOffer] = useState<{
     chapterId: string;
     chapterTitle: string;
+  } | null>(null);
+  const [pendingUndo, setPendingUndo] = useState<{
+    chapterId: string;
+    chapterTitle: string;
+    beforeContent: string;
+    afterContent: string;
+    prompt: string;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const readerRef = useRef<HTMLDivElement | null>(null);
@@ -225,20 +248,14 @@ export function SeasoningView({
 
   const displayHits = useMemo(() => {
     if (!chapter?.content) return [] as SeasoningHit[];
-    return manualHits
-      .filter((hit) => {
-        if (hit.excerptStart < 0 || hit.excerptEnd > chapter.content.length)
-          return false;
-        return (
-          chapter.content.slice(hit.excerptStart, hit.excerptEnd) === hit.excerpt
-        );
-      })
-      .map((hit) =>
-        hit.id === activeHitId
-          ? { ...hit, sceneId: pickedSceneId || undefined }
-          : hit,
+    return manualHits.filter((hit) => {
+      if (hit.excerptStart < 0 || hit.excerptEnd > chapter.content.length)
+        return false;
+      return (
+        chapter.content.slice(hit.excerptStart, hit.excerptEnd) === hit.excerpt
       );
-  }, [manualHits, chapter?.content, activeHitId, pickedSceneId]);
+    });
+  }, [manualHits, chapter?.content]);
 
   const segments = useMemo(
     () =>
@@ -269,7 +286,9 @@ export function SeasoningView({
     setDraftByHit({});
     setAdviceByHit({});
     setRewritePreview(null);
+    setBatchRewritePreview(null);
     setCaptureOffer(null);
+    setPendingUndo(null);
     setManualHits([]);
     setActiveHitId(null);
     setPickedSceneId("");
@@ -327,6 +346,17 @@ export function SeasoningView({
   const activeAdvice = activeHit ? adviceByHit[activeHit.id] ?? "" : "";
   const activeDraft = activeHit ? draftByHit[activeHit.id] ?? "" : "";
   const executableAdvice = activeAdvice.trim() || activeDraft.trim();
+  const batchReadyHits = useMemo(() => {
+    return displayHits
+      .filter((hit) => {
+        const advice = (adviceByHit[hit.id] ?? "").trim();
+        const draft = (draftByHit[hit.id] ?? "").trim();
+        return Boolean(advice || draft);
+      })
+      .sort((left, right) => left.start - right.start);
+  }, [displayHits, adviceByHit, draftByHit]);
+  const batchTargetHits = batchReadyHits.slice(0, BATCH_REWRITE_MAX);
+  const batchReadyCount = batchTargetHits.length;
 
   const setActiveDraft = (value: string) => {
     if (!activeHit) return;
@@ -401,14 +431,23 @@ export function SeasoningView({
       sceneId: pickedSceneId || undefined,
     });
     if (!hit) return;
-    setManualHits((current) => {
-      const withoutOverlap = current.filter(
-        (item) => item.end <= hit.start || item.start >= hit.end,
+    const withoutOverlap = manualHits.filter(
+      (item) => item.end <= hit.start || item.start >= hit.end,
+    );
+    const replaced = withoutOverlap.some((item) => item.id === hit.id);
+    if (!replaced && withoutOverlap.length >= BATCH_REWRITE_MAX) {
+      onToast(
+        `单章最多同时加料 ${BATCH_REWRITE_MAX} 处，请先清空或改写已有选区`,
       );
-      return [...withoutOverlap.filter((item) => item.id !== hit.id), hit];
-    });
+      return;
+    }
+    setManualHits([
+      ...withoutOverlap.filter((item) => item.id !== hit.id),
+      hit,
+    ]);
     setActiveHitId(hit.id);
     setRewritePreview(null);
+    setBatchRewritePreview(null);
     window.getSelection()?.removeAllRanges();
   };
 
@@ -462,10 +501,31 @@ export function SeasoningView({
   };
 
   const cancelBusy = () => {
-    abortRef.current?.abort();
+    const controller = abortRef.current;
+    if (controller) {
+      controller.abort();
+      abortRef.current = null;
+    }
+    setBusy(null);
+    setProgress("");
+  };
+
+  const releaseBusy = (controller: AbortController) => {
+    if (abortRef.current !== controller) return;
     abortRef.current = null;
     setBusy(null);
     setProgress("");
+  };
+
+  const patchHitScene = (hitId: string, sceneId: string) => {
+    setPickedSceneId(sceneId);
+    setManualHits((current) =>
+      current.map((hit) =>
+        hit.id === hitId
+          ? { ...hit, sceneId: sceneId || undefined }
+          : hit,
+      ),
+    );
   };
 
   const selectHit = (hitId: string) => {
@@ -474,6 +534,36 @@ export function SeasoningView({
       current?.hitId === hitId ? current : null,
     );
   };
+
+  const removeHit = (hitId: string) => {
+    if (busy) {
+      onToast("请先取消当前任务再删除选区");
+      return;
+    }
+    setManualHits((current) => current.filter((item) => item.id !== hitId));
+    setDraftByHit((current) => {
+      const next = { ...current };
+      delete next[hitId];
+      return next;
+    });
+    setAdviceByHit((current) => {
+      const next = { ...current };
+      delete next[hitId];
+      return next;
+    });
+    setRewritePreview((current) =>
+      current?.hitId === hitId ? null : current,
+    );
+    setBatchRewritePreview((current) => {
+      if (!current) return current;
+      const next = current.filter((item) => item.hit.id !== hitId);
+      return next.length ? next : null;
+    });
+    setActiveHitId((current) => (current === hitId ? null : current));
+  };
+
+  const hitInstruction = (hitId: string) =>
+    (adviceByHit[hitId] ?? "").trim() || (draftByHit[hitId] ?? "").trim();
 
   const runAdvise = async () => {
     if (!chapter || !activeHit) return;
@@ -499,22 +589,23 @@ export function SeasoningView({
         activeDraft,
         controller.signal,
         (chunk) => {
+          if (abortRef.current !== controller) return;
           setAdviceByHit((current) => ({
             ...current,
             [activeHit.id]: `${current[activeHit.id] ?? ""}${chunk}`,
           }));
         },
       );
+      if (abortRef.current !== controller) return;
       setAdviceByHit((current) => ({ ...current, [activeHit.id]: advice }));
       onToast("已润色加料说明，可再编辑后执行改写");
     } catch (reason) {
+      if (abortRef.current !== controller) return;
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
         onToast(reason instanceof Error ? reason.message : "润色说明失败");
       }
     } finally {
-      setBusy(null);
-      setProgress("");
-      abortRef.current = null;
+      releaseBusy(controller);
     }
   };
 
@@ -533,6 +624,7 @@ export function SeasoningView({
     abortRef.current = controller;
     setBusy("rewrite");
     setProgress("正在按说明改写选区…");
+    setBatchRewritePreview(null);
     setRewritePreview({
       hitId: activeHit.id,
       before: activeHit.excerpt,
@@ -545,6 +637,7 @@ export function SeasoningView({
         executableAdvice,
         controller.signal,
         (chunk) => {
+          if (abortRef.current !== controller) return;
           setRewritePreview((current) =>
             current?.hitId === activeHit.id
               ? { ...current, after: `${current.after}${chunk}` }
@@ -552,6 +645,7 @@ export function SeasoningView({
           );
         },
       );
+      if (abortRef.current !== controller) return;
       setRewritePreview({
         hitId: activeHit.id,
         before: activeHit.excerpt,
@@ -559,42 +653,251 @@ export function SeasoningView({
       });
       onToast("局部改写已就绪，确认后写入");
     } catch (reason) {
+      if (abortRef.current !== controller) return;
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
         onToast(reason instanceof Error ? reason.message : "局部改写失败");
       }
       setRewritePreview(null);
     } finally {
-      setBusy(null);
-      setProgress("");
-      abortRef.current = null;
+      releaseBusy(controller);
     }
+  };
+
+  const runBatchRewrite = async () => {
+    if (!chapter) return;
+    if (!provider?.apiKey.trim()) {
+      onToast(`请先在设置中填写 ${provider?.name ?? "AI"} API Key`);
+      return;
+    }
+    if (!batchReadyCount) {
+      onToast("请先为至少一处选区填写加料说明");
+      return;
+    }
+    if (batchReadyHits.length > BATCH_REWRITE_MAX) {
+      onToast(
+        `已填说明 ${batchReadyHits.length} 处，本次仅并发生成前 ${BATCH_REWRITE_MAX} 处`,
+      );
+    }
+    const targets = batchTargetHits;
+    for (let index = 0; index < targets.length; index += 1) {
+      for (let next = index + 1; next < targets.length; next += 1) {
+        const left = targets[index];
+        const right = targets[next];
+        if (
+          left.excerptStart < right.excerptEnd &&
+          left.excerptEnd > right.excerptStart
+        ) {
+          onToast("选区存在重叠，请调整后再一键改写");
+          return;
+        }
+      }
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy("batchRewrite");
+    setProgress(`并发生成 ${targets.length} 处改写…`);
+    setRewritePreview(null);
+    setBatchRewritePreview(
+      targets.map((hit) => ({
+        hit,
+        before: hit.excerpt,
+        after: "",
+      })),
+    );
+
+    let finished = 0;
+    try {
+      const results = await Promise.all(
+        targets.map(async (hit) => {
+          const advice = hitInstruction(hit.id);
+          const after = await onRewriteHit(
+            chapter,
+            hit,
+            advice,
+            controller.signal,
+            (chunk) => {
+              if (abortRef.current !== controller) return;
+              setBatchRewritePreview((current) =>
+                current?.map((item) =>
+                  item.hit.id === hit.id
+                    ? { ...item, after: `${item.after}${chunk}` }
+                    : item,
+                ) ?? null,
+              );
+            },
+          );
+          if (abortRef.current !== controller) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          finished += 1;
+          setProgress(`并发生成中 ${finished}/${targets.length}…`);
+          setBatchRewritePreview((current) =>
+            current?.map((item) =>
+              item.hit.id === hit.id ? { ...item, after } : item,
+            ) ?? null,
+          );
+          return { hit, before: hit.excerpt, after };
+        }),
+      );
+      if (abortRef.current !== controller || controller.signal.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      setBatchRewritePreview(results);
+      onToast(`已并发生成 ${results.length} 处改写，确认后写入`);
+    } catch (reason) {
+      if (abortRef.current !== controller) return;
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) {
+        onToast(reason instanceof Error ? reason.message : "批量改写失败");
+      }
+      setBatchRewritePreview(null);
+    } finally {
+      releaseBusy(controller);
+    }
+  };
+
+  const commitChapterRewrite = (
+    beforeContent: string,
+    afterContent: string,
+    prompt: string,
+  ) => {
+    if (!chapter) return;
+    const nextTitle = withSeasoningChapterTitle(chapter.title);
+    onUpdate((current) => ({
+      ...current,
+      chapters: current.chapters.map((item) =>
+        item.id === chapter.id
+          ? {
+              ...item,
+              title: nextTitle,
+              content: afterContent,
+              updatedAt: now(),
+            }
+          : item,
+      ),
+      updatedAt: now(),
+    }));
+    onRecordOperation({
+      chapterId: chapter.id,
+      chapterTitle: nextTitle,
+      action: "replace",
+      prompt,
+      beforeContent,
+      afterContent,
+      providerId: provider?.id || "",
+      model: provider?.model || "",
+      tokens: 0,
+    });
+    setPendingUndo({
+      chapterId: chapter.id,
+      chapterTitle: nextTitle,
+      beforeContent,
+      afterContent,
+      prompt,
+    });
+    setRewritePreview(null);
+    setBatchRewritePreview(null);
+    setManualHits([]);
+    setActiveHitId(null);
+    setCaptureOffer({
+      chapterId: chapter.id,
+      chapterTitle: nextTitle,
+    });
+  };
+
+  const undoLastRewrite = () => {
+    if (!pendingUndo) return;
+    const liveChapter =
+      project.chapters.find((item) => item.id === pendingUndo.chapterId) ??
+      null;
+    if (!liveChapter) {
+      onToast("章节不存在，无法撤回");
+      setPendingUndo(null);
+      setCaptureOffer(null);
+      return;
+    }
+    if (liveChapter.content !== pendingUndo.afterContent) {
+      onToast("正文已被后续修改，无法直接撤回本次加料");
+      return;
+    }
+    onUpdate((current) => ({
+      ...current,
+      chapters: current.chapters.map((item) =>
+        item.id === pendingUndo.chapterId
+          ? {
+              ...item,
+              content: pendingUndo.beforeContent,
+              updatedAt: now(),
+            }
+          : item,
+      ),
+      updatedAt: now(),
+    }));
+    onRecordOperation({
+      chapterId: pendingUndo.chapterId,
+      chapterTitle: pendingUndo.chapterTitle,
+      action: "restore",
+      prompt: `回退：${pendingUndo.prompt}`,
+      beforeContent: pendingUndo.afterContent,
+      afterContent: pendingUndo.beforeContent,
+      providerId: provider?.id || "",
+      model: provider?.model || "",
+      tokens: 0,
+    });
+    setPendingUndo(null);
+    setCaptureOffer(null);
+    onToast("已撤回本次加料写入");
   };
 
   const applyRewrite = () => {
     if (!chapter || !activeHit || !rewritePreview?.after.trim()) return;
     if (rewritePreview.hitId !== activeHit.id) return;
-    const nextContent = applySeasoningHitRewrite(
+    let nextContent = "";
+    try {
+      nextContent = applySeasoningHitRewrite(
+        chapter.content,
+        activeHit,
+        rewritePreview.after,
+      );
+    } catch (reason) {
+      onToast(reason instanceof Error ? reason.message : "写入失败");
+      return;
+    }
+    commitChapterRewrite(
       chapter.content,
-      activeHit,
-      rewritePreview.after,
+      nextContent,
+      `局部加料｜${activeHit.matchedText}`,
     );
-    onUpdate((current) => ({
-      ...current,
-      chapters: current.chapters.map((item) =>
-        item.id === chapter.id
-          ? { ...item, content: nextContent, updatedAt: now() }
-          : item,
-      ),
-      updatedAt: now(),
-    }));
-    setRewritePreview(null);
-    setManualHits([]);
-    setActiveHitId(null);
-    setCaptureOffer({
-      chapterId: chapter.id,
-      chapterTitle: chapter.title,
-    });
-    onToast("已写入局部加料，可选择是否补充设定");
+    onToast("已写入局部加料，可撤回或补充设定");
+  };
+
+  const applyBatchRewrite = () => {
+    if (!chapter || !batchRewritePreview?.length) return;
+    if (batchRewritePreview.some((item) => !item.after.trim())) {
+      onToast("还有选区未生成完成，请稍候或取消后重试");
+      return;
+    }
+    let nextContent = "";
+    try {
+      nextContent = applySeasoningHitRewrites(
+        chapter.content,
+        batchRewritePreview.map((item) => ({
+          hit: item.hit,
+          replacement: item.after,
+        })),
+      );
+    } catch (reason) {
+      onToast(reason instanceof Error ? reason.message : "写入失败");
+      return;
+    }
+    const count = batchRewritePreview.length;
+    commitChapterRewrite(
+      chapter.content,
+      nextContent,
+      `局部加料｜${count} 处选区`,
+    );
+    onToast(`已写入 ${count} 处局部加料，可撤回或补充设定`);
   };
 
   const dismissCaptureOffer = () => setCaptureOffer(null);
@@ -625,13 +928,12 @@ export function SeasoningView({
         onToast("未发现需要新增的角色或时间线，已跳过写入");
       }
     } catch (reason) {
+      if (abortRef.current !== controller) return;
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
         onToast(reason instanceof Error ? reason.message : "补充设定失败");
       }
     } finally {
-      setBusy(null);
-      setProgress("");
-      abortRef.current = null;
+      releaseBusy(controller);
     }
   };
 
@@ -679,7 +981,7 @@ export function SeasoningView({
       <div className="seasoning-toolbar">
         <div>
           <p>
-            在正文中拖选片段，先写你的加料说明，再让 AI 润色，确认后按说明改写；场景/规范可选。
+            在正文中拖选片段（最多 3 处），先写加料说明，可一键并发生成改写后确认写入；场景/规范可选。
           </p>
           <small
             className={`context-budget context-budget-${budget.level}`}
@@ -776,19 +1078,42 @@ export function SeasoningView({
                 打开大纲
               </button>
               {!chapter?.content.trim() ? null : (
-                <button
-                  type="button"
-                  className="secondary-button compact"
-                  disabled={Boolean(busy) || !displayHits.length}
-                  onClick={() => {
-                    setManualHits([]);
-                    setActiveHitId(null);
-                    setRewritePreview(null);
-                    onToast("已清空本次选区");
-                  }}
-                >
-                  清空选区
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="secondary-button compact"
+                    disabled={Boolean(busy) || !displayHits.length}
+                    onClick={() => {
+                      setManualHits([]);
+                      setActiveHitId(null);
+                      setRewritePreview(null);
+                      setBatchRewritePreview(null);
+                      onToast("已清空本次选区");
+                    }}
+                  >
+                    清空选区
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button compact"
+                    disabled={Boolean(busy) || batchReadyCount < 1}
+                    title={
+                      batchReadyCount
+                        ? `并发生成 ${batchReadyCount} 处已填说明的选区改写`
+                        : "请先为选区填写加料说明"
+                    }
+                    onClick={() => void runBatchRewrite()}
+                  >
+                    {busy === "batchRewrite" ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : (
+                      <Check size={14} />
+                    )}
+                    {busy === "batchRewrite"
+                      ? "并发生成中…"
+                      : `一键改写${batchReadyCount ? ` ${batchReadyCount}` : ""}处`}
+                  </button>
+                </>
               )}
               <button
                 type="button"
@@ -826,18 +1151,35 @@ export function SeasoningView({
               <aside className="seasoning-hit-list" aria-label="选区列表">
                 {displayHits.length ? (
                   displayHits.map((hit, index) => (
-                    <button
+                    <div
                       key={hit.id}
-                      type="button"
                       className={`seasoning-hit-item ${activeHit?.id === hit.id ? "active" : ""}`}
-                      onClick={() => selectHit(hit.id)}
                     >
-                      <span>{String(index + 1).padStart(2, "0")}</span>
-                      <strong>「{hit.matchedText}」</strong>
-                      <small>
-                        {hit.excerpt.length.toLocaleString()} 字 · 手动选中
-                      </small>
-                    </button>
+                      <button
+                        type="button"
+                        className="seasoning-hit-select"
+                        onClick={() => selectHit(hit.id)}
+                      >
+                        <span>{String(index + 1).padStart(2, "0")}</span>
+                        <strong>「{hit.matchedText}」</strong>
+                        <small>
+                          {hit.excerpt.length.toLocaleString()} 字
+                          {hitInstruction(hit.id)
+                            ? " · 已填说明"
+                            : " · 待填说明"}
+                        </small>
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button small seasoning-hit-remove"
+                        disabled={Boolean(busy)}
+                        aria-label={`删除选区「${hit.matchedText}」`}
+                        title="删除此选区"
+                        onClick={() => removeHit(hit.id)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   ))
                 ) : (
                   <div className="seasoning-hit-empty">
@@ -901,7 +1243,7 @@ export function SeasoningView({
                         value={pickedSceneId}
                         disabled={Boolean(busy)}
                         onChange={(event) =>
-                          setPickedSceneId(event.target.value)
+                          patchHitScene(activeHit.id, event.target.value)
                         }
                       >
                         <option value="">不指定场景</option>
@@ -1015,17 +1357,76 @@ export function SeasoningView({
                         </div>
                       </div>
                     ) : null}
+                    {batchRewritePreview?.length ? (
+                      <div className="seasoning-local-diff">
+                        <span>
+                          批量改写预览（{batchRewritePreview.length} 处，确认后按位置从后往前写入）
+                        </span>
+                        {batchRewritePreview.map((item, index) => (
+                          <div key={item.hit.id} className="seasoning-diff-grid">
+                            <section>
+                              <h3>
+                                {index + 1}. 原文「{item.hit.matchedText}」
+                              </h3>
+                              <pre>{item.before}</pre>
+                            </section>
+                            <section>
+                              <h3>改写</h3>
+                              <pre>
+                                {item.after ||
+                                  (busy === "batchRewrite" ? "生成中…" : "")}
+                              </pre>
+                            </section>
+                          </div>
+                        ))}
+                        <div className="seasoning-advice-actions">
+                          <button
+                            type="button"
+                            className="secondary-button compact"
+                            disabled={Boolean(busy)}
+                            onClick={() => setBatchRewritePreview(null)}
+                          >
+                            放弃全部
+                          </button>
+                          <button
+                            type="button"
+                            className="primary-button compact"
+                            disabled={
+                              Boolean(busy) ||
+                              batchRewritePreview.some(
+                                (item) => !item.after.trim(),
+                              )
+                            }
+                            onClick={applyBatchRewrite}
+                          >
+                            <Check size={15} />
+                            写入全部选区
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {captureOffer?.chapterId === chapter?.id ? (
                       <div className="seasoning-capture-offer">
                         <strong>是否补充设定？</strong>
                         <p>
                           正文已写入《{captureOffer.chapterTitle}
-                          》。可根据本次加料内容抽取角色资料与时间线记忆；不需要可跳过。
+                          》。可根据本次加料内容抽取角色资料与时间线记忆；也可先撤回本次写入。
                         </p>
                         {busy === "capture" && progress ? (
                           <p className="import-txt-warning warn">{progress}</p>
                         ) : null}
                         <div className="seasoning-advice-actions">
+                          {pendingUndo?.chapterId === captureOffer.chapterId ? (
+                            <button
+                              type="button"
+                              className="secondary-button compact danger"
+                              disabled={Boolean(busy)}
+                              onClick={undoLastRewrite}
+                            >
+                              <Undo2 size={15} />
+                              撤回本次写入
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className="secondary-button compact"
@@ -1057,13 +1458,27 @@ export function SeasoningView({
                   <div className="seasoning-advice-empty">
                     在正文拖选一段文字后，先写加料说明，再润色并改写。
                     {captureOffer?.chapterId === chapter?.id ? (
-                      <div className="seasoning-capture-offer" style={{ marginTop: 12, textAlign: "left" }}>
+                      <div
+                        className="seasoning-capture-offer"
+                        style={{ marginTop: 12, textAlign: "left" }}
+                      >
                         <strong>是否补充设定？</strong>
                         <p>
                           正文已写入《{captureOffer.chapterTitle}
-                          》。可继续补充角色与时间线。
+                          》。可撤回本次写入，或继续补充角色与时间线。
                         </p>
                         <div className="seasoning-advice-actions">
+                          {pendingUndo?.chapterId === captureOffer.chapterId ? (
+                            <button
+                              type="button"
+                              className="secondary-button compact danger"
+                              disabled={Boolean(busy)}
+                              onClick={undoLastRewrite}
+                            >
+                              <Undo2 size={15} />
+                              撤回本次写入
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className="secondary-button compact"

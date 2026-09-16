@@ -421,7 +421,7 @@ export const buildStyleFingerprintPrompt = (
 正文：
 ${sample}
 
-请用中文输出一段 200-400 字的文风说明，覆盖：叙事视角与人称、句长与段落节奏、对白习惯、修辞偏好、禁忌（避免的腔调）。不要举例整段抄文，不要 JSON。`
+请用中文输出一段 200-400 字的文风说明，重点关注性行为场景。覆盖：叙事视角与人称、句长与段落节奏、对白习惯、修辞偏好、禁忌（避免的腔调）。不要举例整段抄文，不要 JSON。`
 
 export const buildContinueNextChapterPrompt = (
   project: NovelProject,
@@ -587,34 +587,6 @@ export const PLOT_SAFE_POLISH_INSTRUCTION =
 export const PLOT_SAFE_BRIDGE_INSTRUCTION =
   '在不改变任何剧情事件结果与关键信息的前提下，检查并润色上一章、当前章、下一章的衔接与重复表达，使语气连贯。禁止无意义重复；若某章无需改动仍输出该章完整原文。'
 
-export const buildSeasoningEnrichInstruction = (project: NovelProject) => {
-  const lore = compactProjectLoreForPrompt(project)
-  return `执行「加料」修订：在不改变剧情事件结果、人物关系、能力边界与关键信息的前提下，按加料资料增强正文细节。
-
-【场景说明】
-${lore.scenes || '暂无'}
-
-【识别点与关键字】
-${(project.seasoningSignals ?? [])
-  .map((item) => {
-    const linked = item.linkId
-      ? (project.seasoningScenes ?? []).find((scene) => scene.id === item.linkId)
-      : null
-    const linkText = linked ? `（触发场景：${linked.title}）` : ''
-    return `${item.title}[${item.category}]${linkText}：${item.content}`
-  })
-  .join('\n') || '暂无'}
-
-【加料规范】
-${lore.rules || '暂无'}
-
-硬规则：
-1. 正文命中识别点/关键字时，优先按「触发场景」对应的场景说明补情绪、感官、动作、微表情、环境或生理反应；无关联场景则按识别点正文说明增强。
-2. 严格遵守加料规范中的必须 / 禁止 / 偏好 / 密度要求。
-3. 不新增无关支线，不改事件结果与关键伏笔；可随指令增加字数但不进行重复的强调或者重复的描写，禁止注水空话。
-4. 只输出可直接替换的完整章节正文，不要解释或 Markdown。`
-}
-
 export type SeasoningHitPromptInput = {
   chapterTitle: string
   matchedText: string
@@ -644,7 +616,7 @@ export const buildSeasoningHitAdvicePrompt = (
 选中摘要：${safePromptLabel(hit.matchedText, 80)}
 
 【选中原文】
-${referenceData('选中原文', hit.excerpt, 2400)}
+${referenceData('选中原文', hit.excerpt, 5000)}
 
 【作者加料说明（待润色）】
 ${authorInstruction(hit.authorDraft || '', 3000)}

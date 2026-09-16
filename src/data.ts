@@ -24,41 +24,81 @@ export const createChapter = (index = 1): Chapter => ({
   updatedAt: now(),
 });
 
+/** 解析作品应恢复的章节：优先 lastChapterId，无效则第一章。 */
+export const resolveProjectChapterId = (
+  project: NovelProject | null | undefined,
+) => {
+  if (!project?.chapters.length) return null;
+  if (
+    project.lastChapterId &&
+    project.chapters.some((chapter) => chapter.id === project.lastChapterId)
+  ) {
+    return project.lastChapterId;
+  }
+  return project.chapters[0]?.id ?? null;
+};
+
 export const createProject = (
   title: string,
   genre: string,
   synopsis: string,
-): NovelProject => ({
-  id: uid(),
-  title: title.trim() || "未命名小说",
-  genre: genre.trim() || "未分类",
-  synopsis: synopsis.trim(),
-  coverColor: ["#2f8f75", "#c36b4b", "#58779b", "#75618c"][
-    Math.floor(Math.random() * 4)
-  ],
-  createdAt: now(),
-  updatedAt: now(),
-  origin: "manual",
-  chapters: [createChapter()],
-  characters: [],
-  worldNotes: [],
-  plotNotes: [],
-  ideas: [],
-  memories: [],
-  seasoningScenes: [],
-  seasoningSignals: [],
-  seasoningRules: [],
-  trash: [],
-  aiMemory: [],
-  aiOperations: [],
-  aiUsage: [],
-});
+): NovelProject => {
+  const chapter = createChapter();
+  return {
+    id: uid(),
+    title: title.trim() || "未命名小说",
+    genre: genre.trim() || "未分类",
+    synopsis: synopsis.trim(),
+    coverColor: ["#2f8f75", "#c36b4b", "#58779b", "#75618c"][
+      Math.floor(Math.random() * 4)
+    ],
+    createdAt: now(),
+    updatedAt: now(),
+    origin: "manual",
+    lastChapterId: chapter.id,
+    chapters: [chapter],
+    characters: [],
+    worldNotes: [],
+    plotNotes: [],
+    ideas: [],
+    memories: [],
+    seasoningScenes: [],
+    seasoningSignals: [],
+    seasoningRules: [],
+    trash: [],
+    aiMemory: [],
+    aiOperations: [],
+    aiUsage: [],
+  };
+};
 
 export const createAiProject = (
   plan: AiNovelPlan,
   request: AiNovelRequest,
 ): NovelProject => {
   const timestamp = now();
+  const chapters = plan.chapters
+    .slice(0, request.chapterCount)
+    .map((chapter, index) => ({
+      id: uid(),
+      title: chapter.title.trim() || `第${index + 1}章`,
+      summary: [
+        chapter.summary.trim(),
+        chapter.goal ? `目标：${chapter.goal}` : "",
+        chapter.obstacle ? `阻力：${chapter.obstacle}` : "",
+        chapter.cost ? `代价：${chapter.cost}` : "",
+        chapter.strand ? `主线类型：${chapter.strand}` : "",
+        chapter.hook ? `章末钩子：${chapter.hook}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      content: "",
+      targetWords: request.wordsPerChapter,
+      status: "draft" as const,
+      generationStatus: "pending" as const,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
   return {
     id: uid(),
     title: plan.title.trim() || "AI 生成小说",
@@ -70,28 +110,8 @@ export const createAiProject = (
     createdAt: timestamp,
     updatedAt: timestamp,
     origin: "ai",
-    chapters: plan.chapters
-      .slice(0, request.chapterCount)
-      .map((chapter, index) => ({
-        id: uid(),
-        title: chapter.title.trim() || `第${index + 1}章`,
-        summary: [
-          chapter.summary.trim(),
-          chapter.goal ? `目标：${chapter.goal}` : "",
-          chapter.obstacle ? `阻力：${chapter.obstacle}` : "",
-          chapter.cost ? `代价：${chapter.cost}` : "",
-          chapter.strand ? `主线类型：${chapter.strand}` : "",
-          chapter.hook ? `章末钩子：${chapter.hook}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        content: "",
-        targetWords: request.wordsPerChapter,
-        status: "draft",
-        generationStatus: "pending",
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      })),
+    lastChapterId: chapters[0]?.id,
+    chapters,
     characters: plan.characters.map((character) => ({
       id: uid(),
       name: character.name || "未命名角色",
@@ -664,6 +684,13 @@ export const appendContinueOutlineChapters = (
 export const createSequelProject = (source: NovelProject): NovelProject => {
   const timestamp = now();
   const baseTitle = source.title.replace(/（续）$/, "").trim() || "未命名小说";
+  const firstChapter = {
+    ...createChapter(1),
+    title: "续·第一章",
+    summary: "承接前作结局，开启新的冲突。",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
   return {
     id: uid(),
     title: `${baseTitle}（续）`,
@@ -675,15 +702,8 @@ export const createSequelProject = (source: NovelProject): NovelProject => {
     createdAt: timestamp,
     updatedAt: timestamp,
     origin: "sequel",
-    chapters: [
-      {
-        ...createChapter(1),
-        title: "续·第一章",
-        summary: "承接前作结局，开启新的冲突。",
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      },
-    ],
+    lastChapterId: firstChapter.id,
+    chapters: [firstChapter],
     characters: source.characters.map((item) => ({
       ...item,
       id: uid(),

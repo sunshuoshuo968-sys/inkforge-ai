@@ -108,6 +108,7 @@ import {
   createSequelProject,
   defaultData,
   now,
+  resolveProjectChapterId,
   supplementProjectLore,
   uid,
 } from "./data";
@@ -118,9 +119,7 @@ import {
 } from "./ImportedBookToolkit";
 import { SeasoningView } from "./SeasoningPanel";
 import {
-  assessSeasoningDraft,
   estimateContextBudget,
-  type SeasoningDraft,
   type SeasoningHit,
 } from "./seasoning";
 import { exportData, loadData, parseImport, saveData } from "./storage";
@@ -177,7 +176,6 @@ import {
   buildPostSeasoningCapturePrompt,
   buildReviewPrompt,
   buildRevisionPrompt,
-  buildSeasoningEnrichInstruction,
   buildSeasoningHitAdvicePrompt,
   buildSeasoningHitRewritePrompt,
   buildSettingGapPrompt,
@@ -304,50 +302,57 @@ function App() {
             ],
           },
           aiUsage: stored.aiUsage ?? [],
-          projects: stored.projects.map((project) => ({
-            ...project,
-            generation: project.generation
-              ? {
-                  ...project.generation,
-                  // Older saves used the removed "fanqie" quality mode.
-                  qualityMode:
-                    String(project.generation.qualityMode) === "fanqie"
-                      ? ("standard" as const)
-                      : project.generation.qualityMode,
-                }
-              : undefined,
-            memories: project.memories ?? [],
-            seasoningScenes: project.seasoningScenes ?? [],
-            seasoningSignals: project.seasoningSignals ?? [],
-            seasoningRules: project.seasoningRules ?? [],
-            aiMemory: project.aiMemory ?? [],
-            aiOperations: project.aiOperations ?? [],
-            aiUsage: project.aiUsage ?? [],
-            ...(project.generation?.status === "generating"
-              ? {
-                  generation: {
+          projects: stored.projects.map((project) => {
+            const normalizedProject = {
+              ...project,
+              generation: project.generation
+                ? {
                     ...project.generation,
-                    status: "paused" as const,
-                  },
-                  chapters: project.chapters.map((chapter) =>
-                    chapter.generationStatus === "generating"
-                      ? {
-                          ...chapter,
-                          generationStatus: "pending",
-                          workflowStage: undefined,
-                        }
-                      : chapter,
-                  ),
-                }
-              : {}),
-          })),
+                    // Older saves used the removed "fanqie" quality mode.
+                    qualityMode:
+                      String(project.generation.qualityMode) === "fanqie"
+                        ? ("standard" as const)
+                        : project.generation.qualityMode,
+                  }
+                : undefined,
+              memories: project.memories ?? [],
+              seasoningScenes: project.seasoningScenes ?? [],
+              seasoningSignals: project.seasoningSignals ?? [],
+              seasoningRules: project.seasoningRules ?? [],
+              aiMemory: project.aiMemory ?? [],
+              aiOperations: project.aiOperations ?? [],
+              aiUsage: project.aiUsage ?? [],
+              ...(project.generation?.status === "generating"
+                ? {
+                    generation: {
+                      ...project.generation,
+                      status: "paused" as const,
+                    },
+                    chapters: project.chapters.map((chapter) =>
+                      chapter.generationStatus === "generating"
+                        ? {
+                            ...chapter,
+                            generationStatus: "pending" as const,
+                            workflowStage: undefined,
+                          }
+                        : chapter,
+                    ),
+                  }
+                : {}),
+            };
+            return {
+              ...normalizedProject,
+              lastChapterId:
+                resolveProjectChapterId(normalizedProject) ?? undefined,
+            };
+          }),
         };
         dataRef.current = normalized;
         setData(normalized);
         const active = normalized.projects.find(
           (project) => project.id === normalized.activeProjectId,
         );
-        setSelectedChapterId(active?.chapters[0]?.id ?? null);
+        setSelectedChapterId(resolveProjectChapterId(active));
       })
       .catch(() => setToast("读取本地数据失败，已创建空白工作区"))
       .finally(() => setReady(true));
@@ -386,25 +391,39 @@ function App() {
     [data.projects, data.activeProjectId],
   );
 
-  useEffect(() => {
-    if (!activeProject) {
-      setSelectedChapterId(null);
-      return;
-    }
-    if (
-      !activeProject.chapters.some(
-        (chapter) => chapter.id === selectedChapterId,
-      )
-    ) {
-      setSelectedChapterId(activeProject.chapters[0]?.id ?? null);
-    }
-  }, [activeProject, selectedChapterId]);
-
   const replaceData = useCallback((updater: (current: AppData) => AppData) => {
     const next = updater(dataRef.current);
     dataRef.current = next;
     setData(next);
   }, []);
+
+  const persistLastChapterId = useCallback(
+    (projectId: string, chapterId: string | null) => {
+      replaceData((current) => {
+        const nextId = chapterId ?? undefined;
+        let changed = false;
+        const projects = current.projects.map((project) => {
+          if (project.id !== projectId || project.lastChapterId === nextId) {
+            return project;
+          }
+          changed = true;
+          return { ...project, lastChapterId: nextId };
+        });
+        return changed ? { ...current, projects } : current;
+      });
+    },
+    [replaceData],
+  );
+
+  const selectChapter = useCallback(
+    (chapterId: string | null) => {
+      setSelectedChapterId(chapterId);
+      const projectId = dataRef.current.activeProjectId;
+      if (!projectId) return;
+      persistLastChapterId(projectId, chapterId);
+    },
+    [persistLastChapterId],
+  );
 
   const updateProject = useCallback(
     (projectId: string, updater: (project: NovelProject) => NovelProject) => {
@@ -419,6 +438,24 @@ function App() {
     },
     [replaceData],
   );
+
+  useEffect(() => {
+    if (!activeProject) {
+      setSelectedChapterId(null);
+      return;
+    }
+    if (
+      !activeProject.chapters.some(
+        (chapter) => chapter.id === selectedChapterId,
+      )
+    ) {
+      const fallback = resolveProjectChapterId(activeProject);
+      setSelectedChapterId(fallback);
+      if (activeProject.lastChapterId !== (fallback ?? undefined)) {
+        persistLastChapterId(activeProject.id, fallback);
+      }
+    }
+  }, [activeProject, selectedChapterId, persistLastChapterId]);
 
   const recordUsage = useCallback(
     (
@@ -671,7 +708,7 @@ function App() {
             ),
           }));
           if (dataRef.current.activeProjectId === projectId)
-            setSelectedChapterId(project.chapters[chapterIndex].id);
+            selectChapter(project.chapters[chapterIndex].id);
 
           project = dataRef.current.projects.find(
             (item) => item.id === projectId,
@@ -828,7 +865,7 @@ function App() {
         generationAbortRef.current = null;
       }
     },
-    [streamChapterStage, updateProject],
+    [streamChapterStage, updateProject, selectChapter],
   );
 
   useEffect(() => {
@@ -841,7 +878,11 @@ function App() {
   const switchProject = (projectId: string) => {
     const project = data.projects.find((item) => item.id === projectId);
     replaceData((current) => ({ ...current, activeProjectId: projectId }));
-    setSelectedChapterId(project?.chapters[0]?.id ?? null);
+    const chapterId = resolveProjectChapterId(project);
+    setSelectedChapterId(chapterId);
+    if (project && project.lastChapterId !== (chapterId ?? undefined)) {
+      persistLastChapterId(project.id, chapterId);
+    }
     setView("outline");
   };
 
@@ -858,7 +899,7 @@ function App() {
       projects: [project, ...current.projects],
       activeProjectId: project.id,
     }));
-    setSelectedChapterId(project.chapters[0].id);
+    setSelectedChapterId(resolveProjectChapterId(project));
     setView("outline");
     setNewProjectOpen(false);
   };
@@ -870,7 +911,7 @@ function App() {
       projects: [project, ...current.projects],
       activeProjectId: project.id,
     }));
-    setSelectedChapterId(project.chapters[0]?.id ?? null);
+    setSelectedChapterId(resolveProjectChapterId(project));
     setView("outline");
     setAiCreateOpen(false);
     setToast("大纲已完成，开始逐章生成");
@@ -882,7 +923,7 @@ function App() {
       projects: [project, ...current.projects],
       activeProjectId: project.id,
     }));
-    setSelectedChapterId(project.chapters[0]?.id ?? null);
+    setSelectedChapterId(resolveProjectChapterId(project));
     setView("outline");
     setImportTxtOpen(false);
     setToast(
@@ -1300,7 +1341,7 @@ function App() {
           )
           .join("\n\n"),
       });
-      if (firstNewId) setSelectedChapterId(firstNewId);
+      if (firstNewId) selectChapter(firstNewId);
       setView("outline");
       setToast(`已追加 ${outline.length} 章续写大纲`);
       return;
@@ -1334,6 +1375,7 @@ function App() {
         chapters: [...current.chapters, nextChapter],
       }));
       setSelectedChapterId(nextChapter.id);
+      persistLastChapterId(project.id, nextChapter.id);
       setView("outline");
       let answer = "";
       try {
@@ -1652,223 +1694,10 @@ function App() {
       projects: [sequel, ...current.projects],
       activeProjectId: sequel.id,
     }));
-    setSelectedChapterId(sequel.chapters[0]?.id ?? null);
+    setSelectedChapterId(resolveProjectChapterId(sequel));
     setView("outline");
     setToolkitOpen(false);
     setToast(`已创建续作《${sequel.title}》`);
-  };
-
-  const runSeasoningDrafts = async (
-    project: NovelProject,
-    chapterIndexes: number[],
-    options?: {
-      signal?: AbortSignal;
-      onProgress?: (message: string) => void;
-    },
-  ) => {
-    const { signal, onProgress } = options ?? {};
-    const provider = resolveActiveProvider();
-    const uniqueIndexes = [...new Set(chapterIndexes)]
-      .filter(
-        (index) =>
-          Number.isInteger(index) &&
-          index >= 0 &&
-          index < project.chapters.length,
-      )
-      .slice(0, 3);
-    if (!uniqueIndexes.length) throw new Error("请至少选择 1 章");
-    const hasSeasoning =
-      (project.seasoningScenes?.length ?? 0) +
-        (project.seasoningSignals?.length ?? 0) +
-        (project.seasoningRules?.length ?? 0) >
-      0;
-    if (!hasSeasoning)
-      throw new Error("请先在加料页填写场景说明、识别点或加料规范");
-    const instruction = buildSeasoningEnrichInstruction(project);
-    const drafts: SeasoningDraft[] = [];
-    for (const chapterIndex of uniqueIndexes) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const latest =
-        dataRef.current.projects.find((item) => item.id === project.id) ??
-        project;
-      const chapter = latest.chapters[chapterIndex];
-      if (!chapter) continue;
-      if (!chapter.content.trim()) {
-        onProgress?.(
-          `跳过第${chapterIndex + 1}章《${chapter.title}》（无正文）`,
-        );
-        continue;
-      }
-      onProgress?.(
-        `正在生成加料稿 ${drafts.length + 1}/${uniqueIndexes.length}：第${chapterIndex + 1}章《${chapter.title}》`,
-      );
-      let answer = "";
-      const usage = await streamChat({
-        provider,
-        project: latest,
-        chapterTitle: chapter.title,
-        chapterContent: chapter.content,
-        chapterContextLimit: 1200,
-        interactionMode: "revision",
-        signal,
-        messages: [
-          {
-            role: "user",
-            content: buildChapterTakeoverPrompt(
-              latest,
-              chapter.id,
-              instruction,
-            ),
-          },
-        ],
-        onChunk: (chunk) => {
-          answer += chunk;
-        },
-      });
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const cleaned = answer
-        .trim()
-        .replace(/^```(?:text|markdown)?\s*/i, "")
-        .replace(/\s*```$/, "")
-        .trim();
-      if (!cleaned) throw new Error(`第${chapterIndex + 1}章加料未返回正文`);
-      recordUsage(
-        project.id,
-        provider,
-        usage,
-        "toolkit",
-        countWords(cleaned),
-        chapter.id,
-      );
-      const check = assessSeasoningDraft(chapter.content, cleaned);
-      drafts.push({
-        chapterId: chapter.id,
-        chapterIndex,
-        chapterTitle: chapter.title,
-        before: chapter.content,
-        after: cleaned,
-        tokens: usage.totalTokens,
-        warning: check.warning,
-      });
-    }
-    if (!drafts.length) throw new Error("所选章节均无正文，无法加料");
-    onProgress?.(`已生成 ${drafts.length} 章加料稿，请确认后写入`);
-    return drafts;
-  };
-
-  const applySeasoningDrafts = async (
-    project: NovelProject,
-    drafts: SeasoningDraft[],
-    options?: {
-      signal?: AbortSignal;
-      onProgress?: (message: string) => void;
-    },
-  ) => {
-    const { signal, onProgress } = options ?? {};
-    const provider = resolveActiveProvider();
-    for (const draft of drafts) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      recordAiOperation(project.id, {
-        chapterId: draft.chapterId,
-        chapterTitle: draft.chapterTitle,
-        action: "replace",
-        prompt: "三章加料",
-        beforeContent: draft.before,
-        afterContent: draft.after,
-        providerId: provider.id,
-        model: provider.model,
-        tokens: draft.tokens,
-      });
-      updateProject(project.id, (current) => ({
-        ...current,
-        chapters: current.chapters.map((item) =>
-          item.id === draft.chapterId
-            ? { ...item, content: draft.after, updatedAt: now() }
-            : item,
-        ),
-      }));
-    }
-
-    onProgress?.("正在记录角色与时间线…");
-    const latestAfter =
-      dataRef.current.projects.find((item) => item.id === project.id) ??
-      project;
-    const indexes = drafts.map((item) => item.chapterIndex);
-    const selectedForCapture = indexes
-      .map((index) => {
-        const chapter = latestAfter.chapters[index];
-        if (!chapter?.content.trim()) return null;
-        return {
-          index,
-          title: chapter.title,
-          content: chapter.content,
-        };
-      })
-      .filter((item): item is NonNullable<typeof item> => Boolean(item));
-    let capturedCharacters = 0;
-    let capturedMemories = 0;
-    let captureError = "";
-    if (selectedForCapture.length) {
-      try {
-        const { sample, sampledChapterIndexes } = buildSelectedChaptersSample(
-          selectedForCapture,
-          {
-            maxChapters: 3,
-            perChapterChars: 6500,
-            maxChars: 20000,
-            label: "【加料后正文 · 用于记录角色与时间线】",
-          },
-        );
-        const captured = await runPostSeasoningCapture(
-          provider,
-          buildPostSeasoningCapturePrompt(
-            latestAfter,
-            sample,
-            sampledChapterIndexes,
-          ),
-          signal,
-          (usage) => recordUsage(project.id, provider, usage, "toolkit", 0),
-        );
-        capturedCharacters = captured.characters.length;
-        capturedMemories = captured.memories.length;
-        if (capturedCharacters || capturedMemories) {
-          updateProject(project.id, (current) =>
-            supplementProjectLore(
-              current,
-              {
-                characters: captured.characters,
-                world: [],
-                plot: [],
-                memories: captured.memories,
-              },
-              {
-                chapterIndexes: sampledChapterIndexes,
-                skipIdeaNote: true,
-              },
-            ),
-          );
-        }
-      } catch (reason) {
-        if (reason instanceof DOMException && reason.name === "AbortError")
-          throw reason;
-        captureError =
-          reason instanceof Error ? reason.message : "角色与时间线记录失败";
-      }
-    }
-
-    updateProject(project.id, (current) =>
-      appendIdeaReport(
-        current,
-        "三章加料",
-        `已确认写入 ${drafts.length} 章加料稿。自动记录角色 ${capturedCharacters}、时间线/关系记忆 ${capturedMemories}${captureError ? `。设定记录失败：${captureError}` : ""}。正文可在 AI 操作历史中回退。`,
-      ),
-    );
-    return {
-      draftCount: drafts.length,
-      capturedCharacters,
-      capturedMemories,
-      captureError,
-    };
   };
 
   const buildHitPromptInput = (
@@ -2266,7 +2095,7 @@ function App() {
               providers={data.settings.providers}
               activeProviderId={data.settings.activeProviderId}
               selectedChapterId={selectedChapterId}
-              onSelectChapter={setSelectedChapterId}
+              onSelectChapter={selectChapter}
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
               aiOpen={aiOpen}
               onToggleAi={() => setAiOpen((open) => !open)}
@@ -2314,7 +2143,7 @@ function App() {
               onUpdate={(updater) => updateProject(activeProject.id, updater)}
               onToast={setToast}
               onOpenOutline={() => setView("outline")}
-              onSelectChapter={setSelectedChapterId}
+              onSelectChapter={selectChapter}
               onExtractLore={async () => {
                 const next = await extractLoreIntoProject(activeProject);
                 updateProject(activeProject.id, () => next);
@@ -2340,6 +2169,9 @@ function App() {
                   onProgress,
                 })
               }
+              onRecordOperation={(operation) =>
+                recordAiOperation(activeProject.id, operation)
+              }
             />
           ) : null}
           {view === "trash" && activeProject ? (
@@ -2363,6 +2195,10 @@ function App() {
                   const imported = await parseImport(file, dataRef.current);
                   dataRef.current = imported;
                   setData(imported);
+                  const active = imported.projects.find(
+                    (project) => project.id === imported.activeProjectId,
+                  );
+                  setSelectedChapterId(resolveProjectChapterId(active));
                   setToast("备份已导入（API Key 未从文件恢复）");
                 } catch (error) {
                   setToast(error instanceof Error ? error.message : "导入失败");
@@ -2411,6 +2247,7 @@ function App() {
                     ],
                     activeProjectId: project.id,
                   }));
+                  setSelectedChapterId(resolveProjectChapterId(project));
                   localStorage.removeItem("mogu-last-deleted-project");
                   setToast("小说已恢复");
                 } catch {

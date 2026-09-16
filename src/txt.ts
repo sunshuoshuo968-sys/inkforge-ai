@@ -320,6 +320,7 @@ export const createProjectFromTxt = (
     }
   })
   project.chapters = mapped.length ? mapped : [createChapter(1)]
+  project.lastChapterId = project.chapters[0]?.id
   project.updatedAt = timestamp
   project.origin = 'imported'
   return project
@@ -338,6 +339,7 @@ export const createProjectFromTxtAsync = async (
   const project = createProject(title.trim() || '导入小说', genre.trim() || '导入', `从本地导入，共 ${chapters.length} 章`)
   if (!chapters.length) {
     project.chapters = [createChapter(1)]
+    project.lastChapterId = project.chapters[0]?.id
     project.updatedAt = timestamp
     project.origin = 'imported'
     onProgress?.(1)
@@ -366,6 +368,7 @@ export const createProjectFromTxtAsync = async (
   }
 
   project.chapters = mapped
+  project.lastChapterId = mapped[0]?.id
   project.updatedAt = timestamp
   project.origin = 'imported'
   onProgress?.(1)

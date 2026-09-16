@@ -212,6 +212,8 @@ export interface NovelProject {
   updatedAt: number;
   /** 作品创建来源；旧存档可缺省。 */
   origin?: "manual" | "ai" | "imported" | "sequel";
+  /** 上次打开的章节；旧存档可缺省，启动时回退第一章。 */
+  lastChapterId?: string;
   chapters: Chapter[];
   characters: Character[];
   worldNotes: NoteItem[];
